@@ -13,10 +13,10 @@ Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`
 in scripts; all `curl` examples below assume this default).
 Auth: `Authorization: Bearer $ZOOOP_API_KEY` on every request.
 
-If `scripts/*.sh` aren't present locally (e.g. when this SKILL.md was
-fetched on its own from `https://api.zooop.ai/skills/zooop/SKILL.md`),
-either grab them once with `curl -fsSL https://api.zooop.ai/skills/zooop/scripts/<name>.sh -o <name>.sh && chmod +x <name>.sh`,
-or skip them and use the inline `curl` recipes shown in each section.
+If `scripts/*.sh` aren't present locally (e.g. this SKILL.md was read
+standalone without cloning the bundle), the inline `curl` recipes in
+each section work the same way. Or `git clone https://github.com/zooopai/skill-zooop`
+to get the full bundle.
 
 ## One-time setup (first run only)
 
@@ -165,6 +165,11 @@ VID=$(echo "$MODELS" | jq -r '.models[] | select(.id=="'"$IID"'") | .versions[0]
 | GET    | `/v1/tasks/{id}`              | Poll task status / outputs                        |
 | POST   | `/v1/uploads`                 | Upload a file (raw body + `Content-Type`)         |
 | GET    | `/v1/uploads/{uploadId}`      | Poll async (video) upload moderation status       |
+
+For the full request / response shapes, query params, error codes, and
+rate-limit numbers, see [`references/api-docs.md`](./references/api-docs.md).
+That file is the canonical REST API reference — read it when this guide
+doesn't cover a specific field.
 
 ## Reading a model's params schema
 

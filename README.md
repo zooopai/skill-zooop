@@ -26,10 +26,8 @@ generation.
 git clone https://github.com/zooopai/skill-zooop
 ```
 
-For agents that only need to read the integration guide without installing
-the full bundle, `SKILL.md` is also served at
-<https://api.zooop.ai/skills/zooop/SKILL.md> with the rest of the bundle
-under `https://api.zooop.ai/skills/zooop/`.
+Or, to read just the integration guide without cloning, fetch
+<https://raw.githubusercontent.com/zooopai/skill-zooop/main/SKILL.md>.
 
 ## Setup
 
@@ -64,7 +62,7 @@ curl -fsS "https://api.zooop.ai/v1/models?type=image&subtype=default" \
 ## Docs
 
 - **Agent integration guide** — [SKILL.md](./SKILL.md)
-- **REST API reference** — <https://api.zooop.ai/api-docs.md>
+- **REST API reference** — [references/api-docs.md](./references/api-docs.md)
 - **llms.txt discovery** — <https://api.zooop.ai/llms.txt>
 - **Single-fetch bundle** — <https://api.zooop.ai/llms-full.txt>
 
