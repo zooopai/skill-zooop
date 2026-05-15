@@ -286,6 +286,46 @@ Errors follow the OpenAI-style envelope:
 For any 5xx other than 503, retry once with a short delay; otherwise surface
 the error to the user.
 
+## Transient errors — don't give up on the first failure
+
+The Internet is messy: even when the API is healthy, a single request can
+fail for reasons that have nothing to do with the API. Before concluding
+"the API is down" or "the user needs a VPN," **retry**.
+
+**Retry these (transient, usually self-heals within seconds):**
+
+- TCP / TLS / connection errors with no HTTP status (`SSL_ERROR_SYSCALL`,
+  `Connection reset`, `ECONNRESET`, `EAI_AGAIN`, curl exit codes 6 / 7 / 35 /
+  52 / 56)
+- HTTP `502` / `503` / `504` (gateway / overload)
+- HTTP `429` — wait for `Retry-After` seconds, then retry
+- Cloudflare-specific `520` – `526` (edge couldn't reach origin)
+
+**Do NOT retry these (permanent — fix or surface to user):**
+
+- All other `4xx`: the request itself is wrong (auth, validation, missing
+  resource). Retrying won't help.
+- `451 moderation_blocked` on uploads: the content was rejected. Retrying
+  the same bytes will be rejected again.
+- `422 token_project_unbound`: the PAT's project is gone. Tell the user
+  to revoke and recreate the token.
+
+**Recommended retry pattern:** up to 3 attempts, exponential backoff
+(1s → 3s → 9s), honoring `Retry-After` when present. If all 3 fail, then
+surface the error.
+
+**Diagnostic sanity check before declaring an outage:** if your retries
+all fail with the same TCP/TLS error, verify the network path before
+blaming the API:
+
+```bash
+curl -fsS -o /dev/null -w "%{http_code}\n" https://zooop.ai      # main site healthy?
+curl -fsS -o /dev/null -w "%{http_code}\n" https://api.zooop.ai/llms.txt
+```
+
+If `zooop.ai` is up but `api.zooop.ai` keeps failing, only THEN report
+to the user; otherwise it's almost always local network or transient.
+
 ## Idempotency (optional)
 
 Pass an `Idempotency-Key: <opaque string ≤ 256 chars>` header on `POST /tasks`
