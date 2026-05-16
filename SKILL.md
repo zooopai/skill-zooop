@@ -1,44 +1,62 @@
 ---
 name: zooop
 description: |
-  Generate images, videos, and audio through the ZOOOP AI platform.
-  Use when the user asks to "generate / create / make" an image, video, or
-  voice clip, or wants to edit / upscale / remove background / lipsync /
-  text-to-speech / clone-voice / generate music or sound effects.
+  Generate or edit images / videos / audio via the ZOOOP AI platform — t2i,
+  i2i, t2v, i2v, lipsync, upscale, remove-background, TTS, voice-clone,
+  sound-effect, music. Use whenever the user asks to generate, create, make,
+  edit, or transform any of those media types.
 ---
 
 # ZOOOP AI generation
 
-Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`
-in scripts; all `curl` examples below assume this default).
+Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`).
 Auth: `Authorization: Bearer $ZOOOP_API_KEY` on every request.
 
-If `scripts/*.sh` aren't present locally (e.g. this SKILL.md was read
-standalone without cloning the bundle), the inline `curl` recipes in
-each section work the same way. Or `git clone https://github.com/zooopai/skill-zooop`
-to get the full bundle.
+`scripts/{upload,quote,submit,poll}.sh` ship with this skill. Inline `curl`
+recipes below work the same way if the bundle isn't cloned. Full request /
+response / error reference: [`references/api-docs.md`](./references/api-docs.md)
+— read it whenever this guide doesn't cover a field.
 
-## One-time setup (first run only)
+## API key — setup, rotation, removal
 
-If `ZOOOP_API_KEY` is unset, instruct the user:
+**The token must NEVER appear in the agent conversation.** This skill runs
+across multiple agent runtimes (Claude Code, Codex, Cursor, …) with
+different retention / training / log policies. A token pasted into chat
+can land in training corpora, telemetry, or shared transcripts — and
+once leaked, it can spend the user's credits until they revoke it.
+Always have the **user** set the env var themselves, in their own
+terminal.
 
-1. Visit https://zooop.ai/user#apiKeys → click **Create token**.
-2. Pick a **project** the token will be bound to (required — the token
-   cannot be re-bound later; create a new token for a different project).
-3. Optionally set a **daily credit cap** (recommended for safety).
-4. Copy the token (shown ONCE — they cannot recover it later).
-5. Run: `export ZOOOP_API_KEY=zpk_live_...`
+Agent: check whether the key is already set (e.g. `echo $ZOOOP_API_KEY`
+or the OS-equivalent). If empty, give the user these instructions
+**verbatim** — do not ask them to paste the token back to you:
+
+1. Visit https://zooop.ai/user#apiKeys → **Create token**.
+2. Pick the project to bind it to (immutable). **Set a daily credit cap**
+   — caps the blast radius if the token ever leaks.
+3. Copy the token (shown ONCE).
+4. In their **own terminal** (NOT this chat) run the line matching their OS:
+   - macOS / Linux / WSL / Git Bash —
+     `echo 'export ZOOOP_API_KEY=zpk_live_…' >> ~/.zshrc && source ~/.zshrc`
+     (use `~/.bashrc` if their shell is bash, not zsh)
+   - Windows PowerShell —
+     `[Environment]::SetEnvironmentVariable('ZOOOP_API_KEY','zpk_live_…','User')`
+   - Windows cmd — `setx ZOOOP_API_KEY "zpk_live_…"`
+5. **Restart the agent** so the new env var is inherited.
+
+**Rotation**: revoke the old token at /user#apiKeys → create a new one →
+user re-runs step 4 with the new value → restart agent.
+**Removal**: revoke at /user#apiKeys → user deletes the same env-var
+setting from the same place.
 
 Credits are charged against the user's existing ZOOOP balance. Every task
-the agent submits, and every file it uploads, lands under the PAT's bound
-project — so the user sees them in that project's history page and storage
-breakdown.
+and every upload lands under the PAT's bound project — visible in that
+project's history page and storage breakdown.
 
 ## How model selection works
 
-The user usually hints which kind of task they want, optionally a specific
-model. Match it to one (type, subType) pair from the table below, list the
-matching models, then pick.
+Match the user's intent to one (type, subType) pair, list the matching
+models, then pick.
 
 | type   | subType            | What it does                                 |
 | ------ | ------------------ | -------------------------------------------- |
@@ -55,138 +73,167 @@ matching models, then pick.
 | audio  | sound-effect       | Generate one-shot sound effect from text     |
 | audio  | music              | Generate a music track from text             |
 
-A model can have multiple versions ("standard" / "pro" / "fast") at
-different price tiers — `versions` in the model row lists each version's
-`id` and `name`. Pricing is enforced server-side at submit time and
-reflected in the task's `creditsCharged` field after completion; agents
-don't see per-call price ahead of time. Use `GET /v1/me` for budget
-planning (`creditsRemainingToday`, `user.creditBalance`).
+Each model has one or more `versions` (e.g. `standard` / `pro` / `fast`)
+with a coarse `typicalPrice` summary like
+`{ typicalCredits: 8, unit: "second", note: "~40 credits for 5s @ 720p" }`.
+That's enough to explain ballpark cost to the user. For an **exact** quote,
+call `POST /v1/quote` (see "Quote before submit"). Final cost is enforced
+server-side at submit time and echoed in `creditsCharged`.
 
 ## Standard workflow
 
-1. **(Optional, first call only) Self-check.** `GET /v1/me` tells the
-   agent its remaining daily budget, account balance, bound project name,
-   and current rate limits — useful for "do I have headroom for this
-   batch?" planning. Skip if cost is uncertain; the submit itself enforces
-   limits authoritatively.
+1. **(Optional, first call only)** `GET /v1/me` — remaining daily budget,
+   account balance, bound project name, current rate-limit numbers.
 
 2. **Discover models** for the matching subtype:
    ```bash
    curl -fsS "$ZOOOP_API_HOST/v1/models?type=video&subtype=motion-control" \
         -H "Authorization: Bearer $ZOOOP_API_KEY"
    ```
-   Match the user's hint (e.g. "用 seedance2") against `name` / `brand.name` /
-   `brand.id`. If the user gave **no hint**, follow the default model rules
-   below — these are admin-curated and reflect ZOOOP's recommended picks
-   for each category.
+   Match the user's hint (e.g. "用 seedance2") against `name` / `brand.name`.
+   No hint → follow "Default model selection" below.
 
 3. **(Optional) Upload local files.** If the user gave a path on disk:
    ```bash
    bash scripts/upload.sh /path/to/file.png
-   # → prints the final URL to use in params (image_url / video_url / audio_url).
+   # → prints the storage URL to feed into params.
    ```
-   The script wraps `POST /v1/uploads`. For images and audio it returns
-   immediately (sync, Aliyun image moderation runs inline). For video it
-   polls the moderation workflow until terminal (typical 5-30s, up to
-   30 min). On block, it exits non-zero — the user's content was rejected.
+   Wraps `POST /v1/uploads`. Image / audio return sync; video polls Aliyun
+   moderation until terminal (5–30s typical). Block → exits non-zero.
 
-4. **Submit the task** — pick a model `id`, one of its `versions[].id`, and
-   fill `params` per the model's `params` schema:
+4. **Quote the task** — exact credits + ETA, no side effects:
+   ```bash
+   bash scripts/quote.sh <interfaceId> <versionId> '<params-json>'
+   # → { "credits": 8, "estimatedSeconds": 18, "breakdown": {...} }
+   ```
+   Safe to repeat. See "Quote before submit" for the confirmation policy.
+
+5. **Submit the task**:
    ```bash
    bash scripts/submit.sh <interfaceId> <versionId> '<params-json>'
    # → { "taskId": "...", "status": "queued", "modelId": "...", "versionId": "..." }
    ```
 
-5. **Poll until terminal.** Blocks until `succeeded` / `failed` / `cancelled`:
+6. **Poll until terminal** (`succeeded` / `failed` / `cancelled`):
    ```bash
    bash scripts/poll.sh <taskId>
    # → { "status": "succeeded", "outputs": [{"url": "..."}], "creditsCharged": 4 }
    ```
 
-6. **Show the user the result URL.** Don't auto-download large videos.
+7. **Show the URL, then offer download.** Proactively ask *"Want me to
+   download it to a local file?"* — on yes, save to Desktop with the
+   extension picked from the response `content-type`:
+
+   ```bash
+   URL=$(echo "$RESULT_JSON" | jq -r '.outputs[0].url')
+   CT=$(curl -sI "$URL" | awk 'tolower($1)=="content-type:" {print $2}' | tr -d '\r')
+   EXT=$(case "$CT" in image/png) echo png;; image/jpeg) echo jpg;;
+                       image/*) echo "${CT#image/}";; video/mp4) echo mp4;;
+                       audio/*) echo "${CT#audio/}";; *) echo bin;; esac)
+   curl -fL -o "$HOME/Desktop/zooop-$(date +%Y%m%d-%H%M%S).$EXT" "$URL"
+   ```
+
+   Skip the prompt only if the user already said "just show the URL".
+
+## Quote before submit
+
+Before every `POST /v1/tasks`, call `POST /v1/quote` with the **same body**
+to get exact credits + P50 ETA. No charge, no DB row, no capacity hold —
+safe to call as often as you like.
+
+```bash
+curl -fsS -X POST "$ZOOOP_API_HOST/v1/quote" \
+  -H "Authorization: Bearer $ZOOOP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"interfaceId":"...","versionId":"...","params":{...}}'
+# → { "credits": 8, "estimatedSeconds": 18, "modelName": "Kling V3",
+#     "breakdown": { "pricingKey": "720p", "base": 8, "multiplier": 1, ... } }
+```
+
+After the quote, print **one compact summary line** before submitting —
+just the agent's choice + cost, so the user can sanity-check it. Don't
+echo the prompt back; they just typed it and re-reading it is noise.
+
+```
+→ Kling V3 · 720p · 8 credits · ~18s
+```
+
+**Confirmation policy** (don't confirm on every task — annoying):
+
+| Situation | Behaviour |
+| --- | --- |
+| Default — single task, no opt-in/out | Print summary line, submit. No "should I continue?". |
+| User said "不用问我" / "just go" / "make N variants" | Submit silently, no extra confirmation. |
+| User said "ask me before spending" / "贵的让我确认" | Confirm before submitting. |
+| Batch (≥ 3 tasks OR total ≥ 100 credits) | Confirm once for the whole batch unless already opted out. |
+| `estimatedSeconds == null` | Say "ETA unknown" — don't invent a number. |
+
+If the quote returns 400 / 404, fix the payload and re-quote — never submit
+a request that just failed to quote.
 
 ## Default model selection
 
-When the user's request is vague ("generate me an image of X", "make a
-video of Y") and does NOT name a specific model, brand, or quality tier,
-pick the defaults below. These are ZOOOP's curated picks; do not deviate
-unless the user explicitly asks for something else.
+When the user's request is vague and does NOT name a model / brand / quality
+tier, pick the curated defaults below.
 
 ### Images (`type=image, subtype=default`)
 
-- Default model: **GPT Image 2.0**.
-- Default params: `quality: "low"`, `resolution: "2k"`, `aspect_ratio: "1:1"`.
-- **If the user says the result quality is not good enough**, re-submit
-  with `quality: "medium"` on the same model. Do NOT switch model on a
-  quality complaint — GPT Image 2's tiered quality is the right knob.
-- Only switch model if the user explicitly asks (e.g. "use Flux" /
-  "用 Seedream").
+- Default model: **GPT Image 2.0** with `quality: "low"`, `resolution: "2k"`,
+  `aspect_ratio: "1:1"`. ~80% of cases are fine at `low`; `medium` handles
+  ~95% of needs.
+- **Quality-sounding words inside the user's prompt are prompt-words, not
+  param hints.** Phrases like "highest quality", "最高质量", "4k",
+  "ultra-realistic", "cinematic", "电影级" appear as decorative descriptors
+  in almost every prompt — they do NOT mean the user is asking you to bump
+  the `quality` param. Keep `quality: "low"`.
+- Bump to `quality: "medium"` when the request is non-trivial (detailed
+  composition, important visual fidelity) or when a `low` result didn't
+  satisfy.
+- `quality: "high"` only for genuinely complex requests (intricate detail,
+  fine typography, multi-subject composition) OR when the user explicitly
+  passes `params.quality: "high"`.
+- Switch to a different image model only when the user explicitly asks
+  (e.g. "use Flux" / "用 Seedream"). Don't switch on a quality complaint.
 
 ### Videos (`type=video, subtype=text-ref`)
-
-Pick from the table below based on the user's quality / cost signal.
-For ambiguous requests, default to the **"Balanced"** row.
 
 | User signal | Pick |
 | --- | --- |
 | "highest quality" / "best" / "电影级" | **Seedance 2** |
-| Balanced (default — no explicit signal) | **Kling O3** → fallback to **Kling V3** → **Happy Horse** → **Grok Imagine** (in this order; pick the first one available in `/v1/models`) |
+| Balanced (default — no explicit signal) | **Kling O3** → fallback to **Kling V3** → **Happy Horse** → **Grok Imagine** (pick first one available) |
 | "cheap" / "fastest" / "性价比" / "便宜" | **Grok Imagine** |
 
-Match by `name` (case-insensitive substring) or `brand.name` against the
-`/v1/models` response.
+Match by `name` (case-insensitive substring) or `brand.name` against `/v1/models`.
 
 ### Other categories
 
 For `audio/*`, `image/edit-image`, and all other video subtypes
 (`motion-control`, `first-last-frame`, `audio-lipsync`, `extend-video`,
-`video-edit`), use **`models[0]`** from `/v1/models` — the response is
-pre-sorted, so the first row is the recommended default.
+`video-edit`), use **`models[0]`** from `/v1/models` — pre-sorted, first row
+is the recommended default.
 
-### How to find a named model by `name`
+## Endpoints
 
-The model `id` is a UUID and varies per deployment, so never hard-code it.
-Instead:
+| Method | Path                       | What                                       |
+| ------ | -------------------------- | ------------------------------------------ |
+| GET    | `/v1/me`                   | Self-introspection                         |
+| GET    | `/v1/models`               | List public models by `type` × `subtype`   |
+| POST   | `/v1/quote`                | Price a task (no side effects)             |
+| POST   | `/v1/tasks`                | Submit a generation                        |
+| GET    | `/v1/tasks/{id}`           | Poll status / outputs                      |
+| POST   | `/v1/uploads`              | Upload a file (raw body + `Content-Type`)  |
+| GET    | `/v1/uploads/{uploadId}`   | Poll async (video) upload moderation       |
 
-```bash
-MODELS=$(curl -fsS "$ZOOOP_API_HOST/v1/models?type=image&subtype=default" \
-              -H "Authorization: Bearer $ZOOOP_API_KEY")
-IID=$(echo "$MODELS" | jq -r '.models[] | select(.name | ascii_downcase | contains("gpt image 2")) | .id' | head -1)
-VID=$(echo "$MODELS" | jq -r '.models[] | select(.id=="'"$IID"'") | .versions[0].id')
-```
-
-## Endpoints (reference)
-
-| Method | Path                          | What                                              |
-| ------ | ----------------------------- | ------------------------------------------------- |
-| GET    | `/v1/me`                      | Self-introspection: key info, project, balance, limits |
-| GET    | `/v1/models`                  | List public models by `type` × `subtype`          |
-| POST   | `/v1/tasks`                   | Submit a generation; returns `taskId`             |
-| GET    | `/v1/tasks/{id}`              | Poll task status / outputs                        |
-| POST   | `/v1/uploads`                 | Upload a file (raw body + `Content-Type`)         |
-| GET    | `/v1/uploads/{uploadId}`      | Poll async (video) upload moderation status       |
-
-For the full request / response shapes, query params, error codes, and
-rate-limit numbers, see [`references/api-docs.md`](./references/api-docs.md).
-That file is the canonical REST API reference — read it when this guide
-doesn't cover a specific field.
+Full request / response shapes live in `references/api-docs.md`.
 
 ## Reading a model's params schema
 
-Each model in `GET /models` has a `params: InterfaceParam[]` array. Each entry has:
-
-- `id` — the key to set in `params` at submit time
-- `type` — one of `image_url`, `image_urls`, `video_url`, `audio_url`, `voice`,
-  `aspect_ratio`, `resolution`, `duration`, `boolean`, `enum`, `text`,
-  `long_text`, `float`, `first_frame`, `last_frame`, `mask_url`, ...
-- `required` — whether the user must supply it
-- `options` — allowed values for `enum` / `aspect_ratio` / `resolution`
-- `constraints` — `min` / `max` / `maxLength` etc.
-- `default` — fallback when the user omits it
-
-Some params have media-URL types (`image_url`, `video_url`, etc.). For those
-the value MUST be a ZOOOP-hosted URL — pass the file through `upload.sh` first
-if the user gave a local path or a foreign URL.
+`/models` returns `params: InterfaceParam[]` per model. Each entry carries
+`id` (the key to set in `params`), `type`, `required`, `options`,
+`constraints`, `default`. Media-URL types (`image_url`, `video_url`,
+`audio_url`, `first_frame`, `last_frame`, `mask_url`, `voice`, …) accept
+only ZOOOP-hosted URLs — pipe foreign URLs / local paths through
+`upload.sh` first. Full type list and behaviour: `references/api-docs.md`.
 
 ## Uploads — single-step raw-body
 
@@ -197,206 +244,100 @@ curl -X POST "$ZOOOP_API_HOST/v1/uploads" \
   --data-binary "@$HOME/Desktop/cat.png"
 ```
 
-The `Content-Type` header drives the moderation path AND the resulting file
-extension — pass the file's REAL mime, not a guess.
+`Content-Type` drives moderation path AND the resulting file extension —
+pass the file's REAL mime, not a guess. Image / audio return sync
+(`{ "status": "ready", "url": ..., "size": ..., "contentType": ... }`).
+Video returns `{ "status": "processing", "uploadId": ..., "pollUrl": ... }`
+— then poll `GET /v1/uploads/{uploadId}` until `ready` / `blocked` / `errored`.
 
-**Image / audio** (sync, < 1s typical):
-```json
-{ "status": "ready", "url": "https://storage.zooop.ai/.../<uuid>.png",
-  "size": 12345, "contentType": "image/png" }
-```
-
-**Video** (async, returns immediately — `uploadId` is a plain UUID):
-```json
-{ "status": "processing",
-  "uploadId": "<uuid>", "pollUrl": "/v1/uploads/<uuid>" }
-```
-
-Then poll:
-```bash
-curl -fsS "$ZOOOP_API_HOST/v1/uploads/$UPLOAD_ID" \
-  -H "Authorization: Bearer $ZOOOP_API_KEY"
-```
-Returns `{ "status": "processing" }` (202), `{ "status": "ready", "url": ... }` (200),
-`{ "status": "blocked", "labels": "...", "error": "..." }`, or `{ "status": "errored" }`.
-
-Allowed Content-Type values:
-- `image/png`, `image/jpeg`, `image/webp`, `image/gif`
-- `audio/mpeg`, `audio/wav`, `audio/webm`, `audio/ogg`
-- `video/mp4`, `video/webm`, `video/quicktime`
-
-Size cap 100 MB. For larger files, instruct the user to upload via the Web UI
-and copy the resulting URL.
+Allowed mimes, size cap (100 MB), and full poll-status shapes: see
+`references/api-docs.md` → `POST /v1/uploads`.
 
 ## Error response shape
 
-Errors follow the OpenAI-style envelope:
+OpenAI-style envelope:
 
 ```json
-{
-  "error": {
-    "message": "Missing required parameters: aspect_ratio, resolution",
-    "type": "invalid_request_error",
-    "code": "missing_required_params",
-    "params": [
-      { "id": "aspect_ratio", "type": "aspect_ratio", "required": true,
-        "options": [{"value": "1:1", "label": "1:1"}, ...], "default": "1:1" },
-      { "id": "resolution", "type": "resolution", "required": true,
-        "options": [...], "default": "1024" }
-    ]
-  }
-}
+{ "error": { "message": "...", "type": "invalid_request_error",
+             "code": "missing_required_params", "params": [...] } }
 ```
 
-- `error.type` — broad family: `invalid_request_error` / `authentication_error` /
-  `permission_error` / `rate_limit_error` / `api_error`. Branch on `code` for
-  fine-grained handling.
-- `error.param` is set when the failure points at a single body / query field.
-- For `missing_required_params`, `error.params` is an array of structured
-  hints — each entry tells the agent what to send (type / valid options /
-  default / numeric bounds), so self-correction works in one round-trip
-  without re-fetching the model.
+- `type` — broad family: `invalid_request_error` / `authentication_error` /
+  `permission_error` / `rate_limit_error` / `api_error`. Branch on `code`.
+- `param` — set when one field is at fault.
+- `missing_required_params` carries a structured `params` array with `id`,
+  `type`, `default`, `options`, `constraints` — self-correct in one
+  round-trip without re-fetching the model.
 
-| HTTP | code                       | Meaning                                    |
-| ---- | -------------------------- | ------------------------------------------ |
-| 400  | `invalid_payload`          | Missing required input or bad shape        |
-| 400  | `missing_required_params`  | Required model params absent — see `params` array for valid options |
-| 400  | `missing_category`         | `/v1/models` called without `type` / `subtype` |
-| 400  | `unknown_category`         | `(type, subtype)` not exposed              |
-| 400  | `invalid_idempotency_key`  | `Idempotency-Key` header malformed         |
-| 401  | `missing_token`            | No `Authorization` header                  |
-| 401  | `invalid_token`            | Token wrong, revoked, or expired           |
-| 402  | `arrears`                  | Account balance went negative — top up     |
-| 402  | `token_daily_cap_exceeded` | This task's cost would breach token's daily cap |
-| 403  | `model_not_public`         | Model exists but not in public API surface |
-| 403  | `account_banned`           | The token's user is banned                 |
-| 404  | `unknown_model`            | Bogus `interfaceId` or disabled model      |
-| 404  | `unknown_task`             | `/tasks/{id}` for a task this token can't see |
-| 404  | `unknown_upload`           | `/uploads/{id}` for an upload this token doesn't own |
-| 413  | `file_too_large`           | Upload body > 100 MB                       |
-| 422  | `moderation_blocked`       | Text prompt or input violates content policy (text mod) |
-| 422  | `token_project_unbound`    | PAT's bound project was deleted — revoke + recreate |
-| 429  | `rate_limited`             | Backoff per `Retry-After`                  |
-| 429  | `token_daily_cap_reached`  | Token's daily credit ceiling was hit (pre-check, before pricing) |
-| 451  | `moderation_blocked`       | Uploaded image was blocked by content moderation |
-| 502  | `storage_upload_failed`    | R2 PUT failed during upload — retry        |
-| 503  | `moderation_unavailable`   | Moderation worker unreachable — retry briefly |
-| 503  | various                    | No enabled provider — try another model     |
+Most common codes (full table in `references/api-docs.md`):
 
-For any 5xx other than 503, retry once with a short delay; otherwise surface
-the error to the user.
+| HTTP | code                       | Meaning                                          |
+| ---- | -------------------------- | ------------------------------------------------ |
+| 400  | `missing_required_params`  | Required model params absent — see `params` hint |
+| 400  | `invalid_payload`          | Bad body shape                                   |
+| 401  | `invalid_token`            | Token missing / revoked / expired                |
+| 402  | `token_daily_cap_exceeded` | This task's cost would breach the daily cap      |
+| 404  | `unknown_model`            | Bogus `interfaceId` or disabled model            |
+| 422  | `moderation_blocked`       | Text or image violates content policy            |
+| 422  | `token_project_unbound`    | Bound project deleted — revoke + recreate token  |
+| 429  | `rate_limited`             | Honor `Retry-After`                              |
+| 503  | various                    | No enabled provider — try another model          |
 
 ## Transient errors — don't give up on the first failure
 
-The Internet is messy: even when the API is healthy, a single request can
-fail for reasons that have nothing to do with the API. Before concluding
-"the API is down" or "the user needs a VPN," **retry**.
+A single request can fail for reasons that have nothing to do with the API.
+Retry before declaring an outage.
 
-**Retry these (transient, usually self-heals within seconds):**
+**Retry (transient, usually self-heals):** TCP / TLS errors with no HTTP
+status (`ECONNRESET`, `EAI_AGAIN`, curl exit codes 6 / 7 / 35 / 52 / 56);
+HTTP `502` / `503` / `504`; HTTP `429` (honor `Retry-After`); Cloudflare
+`520`–`526`.
 
-- TCP / TLS / connection errors with no HTTP status (`SSL_ERROR_SYSCALL`,
-  `Connection reset`, `ECONNRESET`, `EAI_AGAIN`, curl exit codes 6 / 7 / 35 /
-  52 / 56)
-- HTTP `502` / `503` / `504` (gateway / overload)
-- HTTP `429` — wait for `Retry-After` seconds, then retry
-- Cloudflare-specific `520` – `526` (edge couldn't reach origin)
+**Do NOT retry:** other `4xx` (auth / validation — retry won't help);
+`451 moderation_blocked` (same bytes get rejected again);
+`422 token_project_unbound` (rotate the token).
 
-**Do NOT retry these (permanent — fix or surface to user):**
+**Pattern:** up to 3 attempts, exponential backoff (1s → 3s → 9s), honor
+`Retry-After`. If all 3 fail, surface the error.
 
-- All other `4xx`: the request itself is wrong (auth, validation, missing
-  resource). Retrying won't help.
-- `451 moderation_blocked` on uploads: the content was rejected. Retrying
-  the same bytes will be rejected again.
-- `422 token_project_unbound`: the PAT's project is gone. Tell the user
-  to revoke and recreate the token.
-
-**Recommended retry pattern:** up to 3 attempts, exponential backoff
-(1s → 3s → 9s), honoring `Retry-After` when present. If all 3 fail, then
-surface the error.
-
-**Diagnostic sanity check before declaring an outage:** if your retries
-all fail with the same TCP/TLS error, verify the network path before
-blaming the API:
+**Diagnostic before declaring outage:**
 
 ```bash
-curl -fsS -o /dev/null -w "%{http_code}\n" https://zooop.ai      # main site healthy?
+curl -fsS -o /dev/null -w "%{http_code}\n" https://zooop.ai
 curl -fsS -o /dev/null -w "%{http_code}\n" https://api.zooop.ai/llms.txt
 ```
 
-If `zooop.ai` is up but `api.zooop.ai` keeps failing, only THEN report
-to the user; otherwise it's almost always local network or transient.
+If `zooop.ai` is up but `api.zooop.ai` keeps failing, only THEN report;
+otherwise it's almost always local network or transient.
 
 ## Idempotency (optional)
 
-Pass an `Idempotency-Key: <opaque string ≤ 256 chars>` header on `POST /tasks`
-to safely retry a submit without creating duplicate tasks. Server stores the
-key for **24 hours**; repeat submits with the same `(token, key)` return the
-original `taskId` plus `"idempotent": true`. Useful when network failures
-might cause double-clicks. Stripe-style semantics.
-
-```bash
-curl -X POST "$ZOOOP_API_HOST/v1/tasks" \
-  -H "Authorization: Bearer $ZOOOP_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"interfaceId":"...","versionId":"...","params":{...}}'
-```
+Pass `Idempotency-Key: <opaque string ≤ 256 chars>` on `POST /v1/tasks`.
+Server caches the key for 24h; repeat submits with the same `(token, key)`
+return the original `taskId` plus `"idempotent": true`. Stripe semantics.
 
 ## Self-introspection (`GET /v1/me`)
 
-```bash
-curl -fsS "$ZOOOP_API_HOST/v1/me" \
-  -H "Authorization: Bearer $ZOOOP_API_KEY"
-```
-
-Response:
-```json
-{
-  "key": {
-    "id": "...", "prefix": "zpk_live_...", "label": "claude-code-mac",
-    "createdAt": "...", "expiresAt": null,
-    "dailyCreditCap": 1000,
-    "creditsSpentToday": 42,
-    "creditsRemainingToday": 958
-  },
-  "project": { "id": "...", "name": "My Project" },
-  "user":    { "creditBalance": 84495 },
-  "limits":  { "tasksPerMin": 60, "uploadsPerMin": 30, "uploadPollPerMin": 120 }
-}
-```
-
-Use cases:
-- "Do I have headroom for this 100-task batch?" → check `creditsRemainingToday`
-  (when `dailyCreditCap` is non-null) AND `user.creditBalance`
-- "Where will my tasks show up?" → `project.name`
-- "When does this token expire?" → `expiresAt`
-- "What's the max submit rate?" → `limits.tasksPerMin`
-
-If `project.bound` comes back as `false`, the bound project was deleted —
-all task / upload submits will fail with `token_project_unbound` until the
-user revokes this token and creates a new one.
+Returns `{ key, project, user, limits }` — bound project, daily budget
+(`creditsRemainingToday` when `dailyCreditCap` is set), account
+`creditBalance`, current per-PAT rate-limit numbers. Use it for "do I have
+headroom for this batch?" planning. If `project.bound == false` the bound
+project was deleted — submits will fail with `token_project_unbound`. Full
+schema: `references/api-docs.md` → `GET /v1/me`.
 
 ## Rate limits
 
-Per-PAT, 60-second sliding window:
-
-| Endpoint                     | Default limit |
-| ---------------------------- | ------------- |
-| `POST /v1/tasks`             | 60 / min      |
-| `POST /v1/uploads`           | 30 / min      |
-| `GET /v1/uploads/{id}`       | 120 / min     |
-| `GET /v1/me`                 | 120 / min     |
-| `GET /v1/models`             | (unbounded)   |
-| `GET /v1/tasks/{id}`         | (unbounded)   |
-
-429 responses carry `Retry-After` in seconds — honor it before retrying.
+Per-PAT, 60s sliding window. Headline: `tasks 60/min`, `quote 120/min`,
+`uploads 30/min`, `me / upload-poll 120/min`. `/models` and `/tasks/{id}`
+are unbounded. `429` carries `Retry-After`. Full table:
+`references/api-docs.md` → "Limits".
 
 ## What this skill does NOT do
 
-- It does **not** manage projects, canvases, or organizations — the public
-  API exposes single-shot generation only. The PAT's bound project is
-  chosen at creation time and is immutable.
+- It does **not** manage projects, canvases, or organizations — single-shot
+  generation only. PAT's bound project is fixed at creation time.
 - It does **not** stream progress — poll instead.
-- It does **not** download outputs. Decide downstream whether to fetch URLs.
+- It does **not** auto-download outputs; always **ask** first (step 7)
+  and pick the save extension from response `content-type`.
 - It does **not** allow uploads > 100 MB via the API — direct the user to
   the Web UI for those.

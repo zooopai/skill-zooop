@@ -165,8 +165,10 @@ Response shape:
         { "id": "aspect_ratio", "type": "aspect_ratio", "required": false, "enumValues": ["1:1","16:9","9:16"] }
       ],
       "versions": [
-        { "id": "standard", "name": "Standard" },
-        { "id": "pro",      "name": "Pro" }
+        { "id": "standard", "name": "Standard",
+          "typicalPrice": { "typicalCredits": 4, "unit": "image", "note": "1024×1024, 1:1" } },
+        { "id": "pro",      "name": "Pro",
+          "typicalPrice": { "typicalCredits": 8, "unit": "image", "note": "1024×1024, 1:1" } }
       ],
       "tags": ["HOT"]
     }
@@ -190,6 +192,74 @@ Response shape:
 | audio  | voice-clone        | Voice clone                     |
 | audio  | sound-effect       | Sound effect                    |
 | audio  | music              | Music generation                |
+
+`typicalPrice.unit` values:
+
+- `image` — credits per generated image (total at default dimensions)
+- `second` — credits per second (output for duration-defaulted models, OR
+  per second of input for extend / lipsync-style models)
+- `frame` — credits per frame of input video
+- `1k_chars` — credits per 1000 characters (TTS; all per-character pricing
+  is normalized to this unit so the number is always a relatable integer
+  / one-decimal value rather than a fractional per-char rate)
+- `call` — credits per call (flat, no dimension scaling)
+
+For flat units (`image`, `call`) `typicalCredits` is an integer and the
+`minPrice` floor is already applied. For rate units (`second`, `frame`,
+`1k_chars`) it may be fractional (e.g. `50.5`) to preserve fidelity for
+sub-credit rates. `typicalPrice` is a coarse ballpark only — call
+`POST /v1/quote` (below) with the exact payload you'd submit to get the
+authoritative number.
+
+### `POST /v1/quote`
+
+Price a hypothetical task without submitting. Same request body as
+`POST /v1/tasks` (so an agent can reuse one payload for both calls).
+No credits are charged, no DB row is created, no capacity is reserved —
+safe to repeat freely.
+
+Body:
+
+```json
+{
+  "interfaceId": "<uuid from /models>",
+  "versionId": "standard",
+  "params": { "prompt": "…", "duration": 5 }
+}
+```
+
+Response:
+
+```json
+{
+  "credits": 8,
+  "estimatedSeconds": 18,
+  "modelId": "uuid",
+  "versionId": "standard",
+  "modelName": "Kling V3",
+  "breakdown": {
+    "pricingKey": "720p",
+    "base": 8,
+    "multiplier": 1,
+    "surcharges": 0,
+    "basePrice": 0,
+    "minPriceApplied": false
+  }
+}
+```
+
+- `credits` — authoritative cost for this exact payload. The `POST /v1/tasks`
+  call WILL charge this number, provided input media durations don't change
+  between quote and submit (media duration is part of the pricing basis).
+- `estimatedSeconds` — P50 of the last 10 successful generations on this
+  model. `null` when the model has no completion history yet.
+- `breakdown` — itemised cost so the agent can explain "why" to the user:
+  `final = max(minPrice, ceil(base × multiplier + surcharges + basePrice))`.
+
+Errors mirror `POST /v1/tasks` for the same payload-validation paths
+(`invalid_payload`, `missing_required_params`, `unknown_model`,
+`model_not_public`). Quote also has its own `rate_limited` 429 (default
+120 / min per token).
 
 ### `POST /v1/tasks`
 
@@ -246,7 +316,8 @@ Returns the current state of a task. Path-id is the `taskId` from submit.
 {
   "taskId": "uuid",
   "status": "succeeded",
-  "outputs": [{ "url": "https://...", "thumbnailUrl": "https://..." }],
+  "outputs": [{ "url": "https://storage.zooop.ai/cdn-cgi/image/format=png,quality=95/.../uuid.webp",
+                "thumbnailUrl": "https://storage.zooop.ai/cdn-cgi/image/format=png,quality=95/.../uuid-thumb.webp" }],
   "error": null,
   "creditsCharged": 4,
   "createdAt": "2026-05-14T01:23:45.000Z",
@@ -257,6 +328,30 @@ Returns the current state of a task. Path-id is the `taskId` from submit.
 Public `status` values: `queued | running | succeeded | failed | cancelled`.
 Internal granular states (`pending`, `processing`, `uploading`, `moderating`)
 are collapsed into `running` since they're not actionable for agents.
+
+**Image output URLs** are served via Cloudflare Image Transformations
+(`cdn-cgi/image/format=png,quality=95`). The `format=png` is a soft hint
+that Cloudflare honours selectively:
+
+- Source has **alpha** (background-removal, transparent stickers) →
+  response is **`image/png`** with transparency preserved.
+- Source is fully **opaque** (typical t2i / i2i output) → Cloudflare
+  downgrades to **`image/jpeg`** to keep delivery size small. This is
+  Cloudflare's standard behaviour and there is no URL switch to override.
+
+Either way the response `content-type` reflects the actual format. Trust
+the header, not the URL pathname (which still ends in `.webp` — that's
+the source-object key, not the delivered format). When saving locally,
+pick the extension from `content-type`:
+
+```bash
+URL="https://storage.zooop.ai/cdn-cgi/image/format=png,quality=95/.../uuid.webp"
+CT=$(curl -sI "$URL" | awk 'tolower($1)=="content-type:" {print $2}' | tr -d '\r')
+EXT=$(case "$CT" in image/png) echo png;; image/jpeg) echo jpg;; *) echo bin;; esac)
+curl -fL -o "out.$EXT" "$URL"
+```
+
+Video / audio URLs pass through unchanged.
 
 ### `POST /v1/uploads`
 
@@ -349,6 +444,7 @@ Other tokens (even from the same user account) get 404 `unknown_upload`.
 
 - **Rate limit** (per PAT, 60-second sliding window):
   - `POST /v1/tasks` — 60 req/min
+  - `POST /v1/quote` — 120 req/min
   - `POST /v1/uploads` — 30 req/min
   - `GET /v1/uploads/{id}` — 120 req/min
   - `GET /v1/me` — 120 req/min
