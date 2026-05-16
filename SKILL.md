@@ -55,23 +55,37 @@ project's history page and storage breakdown.
 
 ## How model selection works
 
-Match the user's intent to one (type, subType) pair, list the matching
-models, then pick.
+Match the user's intent to one (type, subType) pair from the table below,
+list the matching models, then pick. **Read the "Required inputs" column
+carefully** — names like `motion-control` and `text-ref` are NOT
+self-explanatory, and picking the wrong subType wastes a round-trip.
 
-| type   | subType            | What it does                                 |
-| ------ | ------------------ | -------------------------------------------- |
-| image  | default            | Text-to-image / image-to-image generation    |
-| image  | edit-image         | Targeted image edit with mask                |
-| video  | text-ref           | Text-to-video                                |
-| video  | motion-control     | Image-to-video with motion direction         |
-| video  | first-last-frame   | Generate video between two keyframes         |
-| video  | audio-lipsync      | Sync a video to an audio track               |
-| video  | extend-video       | Extend an existing video                     |
-| video  | video-edit         | Edit / restyle an existing video             |
-| audio  | text-to-speech     | TTS in a named voice                         |
-| audio  | voice-clone        | Clone a voice from a reference sample        |
-| audio  | sound-effect       | Generate one-shot sound effect from text     |
-| audio  | music              | Generate a music track from text             |
+| type   | subType          | What it does                                                                                  | Required inputs        |
+| ------ | ---------------- | --------------------------------------------------------------------------------------------- | ---------------------- |
+| image  | default          | Text-to-image; many models also accept an input image for img-to-img / reference              | prompt                 |
+| image  | edit-image       | Targeted region edit using a black-and-white mask                                             | prompt + image + mask  |
+| video  | text-ref         | Text-driven video. Some models accept optional reference images **for style** — NOT to animate a still | prompt          |
+| video  | first-last-frame | **Animate a still image.** Provide one image as the start frame; the model generates motion from there. End frame is optional (interpolation) | image (end optional) |
+| video  | motion-control   | Drive an image using motion **copied from a reference video** (e.g. the subject in the image mimics the video's dance) | image + reference video |
+| video  | audio-lipsync    | Make a character image lip-sync to an audio track                                             | image + audio          |
+| video  | extend-video     | Append more frames to an existing video                                                       | video                  |
+| video  | video-edit       | Restyle / re-edit an existing video                                                           | video + prompt         |
+| audio  | text-to-speech   | TTS in a named voice                                                                          | text + voice           |
+| audio  | voice-clone      | Speak text using a voice cloned from a reference sample                                       | text + reference audio |
+| audio  | sound-effect     | One-shot sound effect from text                                                               | text                   |
+| audio  | music            | Music track from text                                                                         | text                   |
+
+### Disambiguation — common user intents → subType
+
+| User says… | Pick |
+| --- | --- |
+| "让这张图动起来" / "animate this poster" / "make this photo move" | **first-last-frame** (image as start frame, end frame left empty) |
+| "用这段视频的动作让我这张图动起来" / "make this person do this dance" | **motion-control** (needs both image AND reference video) |
+| "用这张图当风格参考生成视频" / "use this image as a style ref for the video" | **text-ref** (with the model's optional reference-image param if it has one) |
+| "让这个人对口型说这段话" / "lip-sync this audio to my photo" | **audio-lipsync** |
+| "续写这段视频" / "extend this clip" | **extend-video** |
+| "把这段视频换风格" / "restyle this video" | **video-edit** |
+| Pure prompt → video, no input image | **text-ref** |
 
 Each model has one or more `versions` (e.g. `standard` / `pro` / `fast`)
 with a coarse `typicalPrice` summary like
