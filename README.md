@@ -10,7 +10,13 @@ charged against your existing ZOOOP credit balance.
 
 ## Install
 
-### Claude Code (recommended)
+### Any agent (recommended)
+
+```bash
+npx skills add zooopai/skill-zooop
+```
+
+### Claude Code (native)
 
 ```bash
 claude install github:zooopai/skill-zooop
