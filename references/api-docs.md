@@ -475,3 +475,34 @@ Other tokens (even from the same user account) get 404 `unknown_upload`.
 - **Streaming progress**: poll instead.
 - **Listing tasks / uploads**: no `/tasks?since=` or `/uploads?since=`
   endpoints — track task IDs client-side.
+
+## Transient errors — what to retry, how to diagnose
+
+A single failed request often has nothing to do with the API. Retry the
+transient class with exponential backoff before declaring an outage.
+
+**Retry (transient, usually self-heals):**
+- TCP / TLS errors with no HTTP status — `ECONNRESET`, `EAI_AGAIN`, curl
+  exit codes `6` (DNS), `7` (connect), `35` / `52` / `56` (TLS / recv).
+- HTTP `502` / `503` / `504`.
+- HTTP `429` — honor `Retry-After`.
+- Cloudflare `520`–`526`.
+
+**Do NOT retry:**
+- Other `4xx` (auth / validation — retry won't help).
+- `451 moderation_blocked` — same bytes will be rejected again.
+- `422 token_project_unbound` — bound project deleted; user must rotate
+  the token.
+
+**Pattern:** up to 3 attempts, exponential backoff 1s → 3s → 9s, honor
+`Retry-After`. If all 3 fail, surface the error.
+
+**Diagnostic before declaring outage:**
+
+```bash
+curl -fsS -o /dev/null -w "%{http_code}\n" https://zooop.ai
+curl -fsS -o /dev/null -w "%{http_code}\n" https://api.zooop.ai/llms.txt
+```
+
+If `zooop.ai` is up but `api.zooop.ai` keeps failing, only THEN report an
+outage — otherwise it's almost always local network or transient.

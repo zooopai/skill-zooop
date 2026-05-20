@@ -12,46 +12,33 @@ description: |
 Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`).
 Auth: `Authorization: Bearer $ZOOOP_API_KEY` on every request.
 
-`scripts/{upload,quote,submit,poll}.sh` ship with this skill. Inline `curl`
+`scripts/{upload,quote,submit,poll,download}.sh` ship with this skill. Inline `curl`
 recipes below work the same way if the bundle isn't cloned. Full request /
 response / error reference: [`references/api-docs.md`](./references/api-docs.md)
 — read it whenever this guide doesn't cover a field.
 
-## API key — setup, rotation, removal
+## API key — setup
 
-**The token must NEVER appear in the agent conversation.** This skill runs
-across multiple agent runtimes (Claude Code, Codex, Cursor, …) with
-different retention / training / log policies. A token pasted into chat
-can land in training corpora, telemetry, or shared transcripts — and
-once leaked, it can spend the user's credits until they revoke it.
-Always have the **user** set the env var themselves, in their own
-terminal.
+**The token must NEVER appear in the agent conversation.** Token in chat
+risks leaking into training corpora, telemetry, or shared transcripts —
+once leaked it spends the user's credits until revoked. Always have the
+**user** set the env var themselves, in their own terminal.
 
-Agent: check whether the key is already set (e.g. `echo $ZOOOP_API_KEY`
-or the OS-equivalent). If empty, give the user these instructions
-**verbatim** — do not ask them to paste the token back to you:
+Agent: check `$ZOOOP_API_KEY` (or OS-equivalent). If empty, give the user
+these instructions **verbatim** — do not ask them to paste the token back:
 
-1. Visit https://zooop.ai/user#apiKeys → **Create token**.
-2. Pick the project to bind it to (immutable). **Set a daily credit cap**
-   — caps the blast radius if the token ever leaks.
-3. Copy the token (shown ONCE).
-4. In their **own terminal** (NOT this chat) run the line matching their OS:
+1. Visit https://zooop.ai/user#apiKeys → **Create token** → pick project
+   (immutable) → **set a daily credit cap** → copy token (shown ONCE).
+2. In their **own terminal** (NOT this chat), set the env var:
    - macOS / Linux / WSL / Git Bash —
      `echo 'export ZOOOP_API_KEY=zpk_live_…' >> ~/.zshrc && source ~/.zshrc`
-     (use `~/.bashrc` if their shell is bash, not zsh)
    - Windows PowerShell —
      `[Environment]::SetEnvironmentVariable('ZOOOP_API_KEY','zpk_live_…','User')`
    - Windows cmd — `setx ZOOOP_API_KEY "zpk_live_…"`
-5. **Restart the agent** so the new env var is inherited.
+3. **Restart the agent** so the new env var is inherited.
 
-**Rotation**: revoke the old token at /user#apiKeys → create a new one →
-user re-runs step 4 with the new value → restart agent.
-**Removal**: revoke at /user#apiKeys → user deletes the same env-var
-setting from the same place.
-
-Credits are charged against the user's existing ZOOOP balance. Every task
-and every upload lands under the PAT's bound project — visible in that
-project's history page and storage breakdown.
+Credits charge the user's ZOOOP balance; tasks and uploads land under the
+PAT's bound project.
 
 ## How model selection works
 
@@ -63,8 +50,8 @@ self-explanatory.
 
 | type   | subType          | What it's for                                                                                  |
 | ------ | ---------------- | ---------------------------------------------------------------------------------------------- |
-| image  | default          | Generate a new image (text-to-image, or text + reference image for img-to-img / style transfer) |
-| image  | edit-image       | Targeted region edit of an existing image using a black-and-white mask                          |
+| image  | default          | Generate a new image, **or edit an existing one from a plain text description** (text-to-image, img-to-img, style transfer, prompt-driven edits — GPT Image 2 / Nanobanana handle "把背景换成…" / "去掉左边的人" without any mask) |
+| image  | edit-image       | Targeted region edit driven by a **black-and-white mask or hand-drawn annotation** the user supplies. Only pick this when the user actually provides (or asks to draw) a mask/region — never for plain text-described edits |
 | video  | text-ref         | Generate a video from a prompt. Some models also accept reference images **for style** (referenced as `@Image1` / `@Image2` in the prompt) — these guide look, NOT motion |
 | video  | first-last-frame | **Animate a still image** — provide one image as the start frame and the model generates motion outward. Optional end frame interpolates between two keyframes |
 | video  | motion-control   | Make an image move using motion **copied from a reference video** (e.g. the character in the image performs the action / dance in the reference clip) |
@@ -83,18 +70,20 @@ subType can have different param requirements.
 
 ### Disambiguation — pick subType by intent
 
-The hard cases are video subTypes, where the user's **goal** decides, not
-which media they happen to hand you:
+The hard cases are video subTypes (and image edits), where the user's
+**goal** decides, not which media they happen to hand you:
 
 | User says… | Pick | Why |
 | --- | --- | --- |
-| "让这张图动起来" / "animate this poster" | **first-last-frame** | Goal: bring a still image to life. The image is a *start frame*. |
-| "用这张图当风格参考生成视频" / "use this image as a style reference" | **text-ref** | Goal: generate a new scene; image only shapes look. Reference image goes into the model's `image_urls` / `reference_image_urls` param and is cited as `@Image1` in the prompt. |
-| "让这个角色跳这段舞" / "make this character do this dance" | **motion-control** | Goal: transplant motion from a reference video onto an image. |
-| "让这个人对口型说这段话" / "lip-sync this audio to my photo" | **audio-lipsync** | Goal: drive an image's mouth from audio. |
-| "续写这段视频" / "extend this clip" | **extend-video** | Goal: more frames after the last one. |
-| "把这段视频换风格" / "restyle this video" | **video-edit** | Goal: change look/feel of existing video. |
-| Pure prompt → video, no input image | **text-ref** | Goal: generate from text alone. |
+| "把这张图的背景换成海边" / "remove the person on the left" / "edit this photo to…" (image + text only, no mask) | **image/default** | Plain-text edits go through `default` with GPT Image 2 or Nanobanana — they take a reference image + edit prompt natively. `edit-image` is the wrong pick because it requires a mask the user didn't provide. |
+| "我画了个 mask / 涂了一块区域，只改这里" | **image/edit-image** | The user actually has a mask or hand-drawn region. That's the only time `edit-image` is right. |
+| "让这张图动起来" / "animate this poster" | **video/first-last-frame** | Goal: bring a still image to life. The image is a *start frame*. |
+| "用这张图当风格参考生成视频" / "use this image as a style reference" | **video/text-ref** | Goal: generate a new scene; image only shapes look. Reference image goes into the model's `image_urls` / `reference_image_urls` param and is cited as `@Image1` in the prompt. |
+| "让这个角色跳这段舞" / "make this character do this dance" | **video/motion-control** | Goal: transplant motion from a reference video onto an image. |
+| "让这个人对口型说这段话" / "lip-sync this audio to my photo" | **video/audio-lipsync** | Goal: drive an image's mouth from audio. |
+| "续写这段视频" / "extend this clip" | **video/extend-video** | Goal: more frames after the last one. |
+| "把这段视频换风格" / "restyle this video" | **video/video-edit** | Goal: change look/feel of existing video. |
+| Pure prompt → video, no input image | **video/text-ref** | Goal: generate from text alone. |
 
 Each model has one or more `versions` (e.g. `standard` / `pro` / `fast`)
 with a coarse `typicalPrice` summary like
@@ -144,16 +133,10 @@ server-side at submit time and echoed in `creditsCharged`.
    ```
 
 7. **Show the URL, then offer download.** Proactively ask *"Want me to
-   download it to a local file?"* — on yes, save to Desktop with the
-   extension picked from the response `content-type`:
+   download it to a local file?"* — on yes:
 
    ```bash
-   URL=$(echo "$RESULT_JSON" | jq -r '.outputs[0].url')
-   CT=$(curl -sI "$URL" | awk 'tolower($1)=="content-type:" {print $2}' | tr -d '\r')
-   EXT=$(case "$CT" in image/png) echo png;; image/jpeg) echo jpg;;
-                       image/*) echo "${CT#image/}";; video/mp4) echo mp4;;
-                       audio/*) echo "${CT#audio/}";; *) echo bin;; esac)
-   curl -fL -o "$HOME/Desktop/zooop-$(date +%Y%m%d-%H%M%S).$EXT" "$URL"
+   bash scripts/download.sh <taskId>   # → saves to ~/Desktop, ext picked from content-type
    ```
 
    Skip the prompt only if the user already said "just show the URL".
@@ -201,9 +184,18 @@ tier, pick the curated defaults below.
 
 ### Images (`type=image, subtype=default`)
 
+This subType covers BOTH text-to-image generation AND prompt-driven edits
+of an existing image (e.g. "把背景换成海边", "去掉左边的人", "改成赛博朋克
+风格"). Pass the user's source image as the model's reference-image param
+— no mask required. Only fall back to `subtype=edit-image` if the user
+actually hands over a mask or hand-drawn region.
+
 - Default model: **GPT Image 2.0** with `quality: "low"`, `resolution: "2k"`,
   `aspect_ratio: "1:1"`. ~80% of cases are fine at `low`; `medium` handles
-  ~95% of needs.
+  ~95% of needs. Also strong for prompt-driven edits.
+- For edits where the user wants tight identity / layout preservation
+  (face stays the same, only one element changes), **Nanobanana** is the
+  better pick — match `name` substring `nanobanana` against `/v1/models`.
 - **Quality-sounding words inside the user's prompt are prompt-words, not
   param hints.** Phrases like "highest quality", "最高质量", "4k",
   "ultra-realistic", "cinematic", "电影级" appear as decorative descriptors
@@ -230,10 +222,10 @@ Match by `name` (case-insensitive substring) or `brand.name` against `/v1/models
 
 ### Other categories
 
-For `audio/*`, `image/edit-image`, and all other video subtypes
-(`motion-control`, `first-last-frame`, `audio-lipsync`, `extend-video`,
-`video-edit`), use **`models[0]`** from `/v1/models` — pre-sorted, first row
-is the recommended default.
+For `audio/*`, `image/edit-image` (mask-based only — see disambiguation
+above), and all other video subtypes (`motion-control`, `first-last-frame`,
+`audio-lipsync`, `extend-video`, `video-edit`), use **`models[0]`** from
+`/v1/models` — pre-sorted, first row is the recommended default.
 
 ## Endpoints
 
@@ -306,32 +298,13 @@ Most common codes (full table in `references/api-docs.md`):
 | 429  | `rate_limited`             | Honor `Retry-After`                              |
 | 503  | various                    | No enabled provider — try another model          |
 
-## Transient errors — don't give up on the first failure
+## Transient errors
 
-A single request can fail for reasons that have nothing to do with the API.
-Retry before declaring an outage.
-
-**Retry (transient, usually self-heals):** TCP / TLS errors with no HTTP
-status (`ECONNRESET`, `EAI_AGAIN`, curl exit codes 6 / 7 / 35 / 52 / 56);
-HTTP `502` / `503` / `504`; HTTP `429` (honor `Retry-After`); Cloudflare
-`520`–`526`.
-
-**Do NOT retry:** other `4xx` (auth / validation — retry won't help);
-`451 moderation_blocked` (same bytes get rejected again);
-`422 token_project_unbound` (rotate the token).
-
-**Pattern:** up to 3 attempts, exponential backoff (1s → 3s → 9s), honor
-`Retry-After`. If all 3 fail, surface the error.
-
-**Diagnostic before declaring outage:**
-
-```bash
-curl -fsS -o /dev/null -w "%{http_code}\n" https://zooop.ai
-curl -fsS -o /dev/null -w "%{http_code}\n" https://api.zooop.ai/llms.txt
-```
-
-If `zooop.ai` is up but `api.zooop.ai` keeps failing, only THEN report;
-otherwise it's almost always local network or transient.
+Up to 3 attempts with exponential backoff (1s → 3s → 9s), honor
+`Retry-After`. Retry only: connection errors with no HTTP status, `5xx`,
+`429`. Don't retry other `4xx`, `451 moderation_blocked`, or
+`422 token_project_unbound`. Full retry table + outage-diagnostic curls:
+`references/api-docs.md` → "Transient errors".
 
 ## Idempotency (optional)
 
