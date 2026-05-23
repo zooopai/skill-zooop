@@ -12,10 +12,11 @@ description: |
 Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`).
 Auth: `Authorization: Bearer $ZOOOP_API_KEY` on every request.
 
-`scripts/{upload,quote,submit,poll,download}.sh` ship with this skill. Inline `curl`
-recipes below work the same way if the bundle isn't cloned. Full request /
-response / error reference: [`references/api-docs.md`](./references/api-docs.md)
-— read it whenever this guide doesn't cover a field.
+`scripts/{upload,quote,submit,poll,download,ai-tools,describe}.sh` ship with
+this skill. Inline `curl` recipes below work the same way if the bundle isn't
+cloned. Full request / response / error reference:
+[`references/api-docs.md`](./references/api-docs.md) — read it whenever this
+guide doesn't cover a field.
 
 ## API key — setup
 
@@ -40,7 +41,40 @@ these instructions **verbatim** — do not ask them to paste the token back:
 Credits charge the user's ZOOOP balance; tasks and uploads land under the
 PAT's bound project.
 
-## How model selection works
+## Two paths: raw model vs AI tool
+
+ZOOOP exposes generation in **two flavours**. Pick once per task:
+
+| Path | When | How |
+| --- | --- | --- |
+| **Raw model** (`interfaceId` + `versionId`) | The user named a brand / quality tier ("用 Seedance 2", "highest quality") or you need full param control | `GET /v1/models?type=…&subtype=…` → submit with `interfaceId` + `versionId` + `params` |
+| **AI tool** (`aiTool` slug) | The user described an **outcome** that maps to a curated recipe — "去背景", "证件照", "动作模仿", "图片放大", "AI 修复老照片" | `GET /v1/ai-tools` → submit with `aiTool: <slug>` + the recipe's `params[]` |
+
+AI tools are admin-curated recipes: model + version + fixed params + tuned
+defaults all pre-wired. The agent supplies only the visible inputs (often
+just one image, sometimes a style prompt). Pricing may differ from the raw
+underlying model — `typicalPrice` on the tool is authoritative for tools.
+
+Default behaviour: **try AI tools first when the user phrased a task in
+outcome terms**. Fall back to raw models when nothing matches or the user
+explicitly named a model.
+
+```bash
+# Browse curated tools
+bash scripts/ai-tools.sh                 # all
+bash scripts/ai-tools.sh image           # only image
+bash scripts/ai-tools.sh video           # only video
+bash scripts/ai-tools.sh -s <slug>       # one tool's full param schema
+```
+
+Submit / quote via the same scripts using `--ai-tool`:
+
+```bash
+bash scripts/submit.sh --ai-tool background-removal '{"image_url":"https://storage.zooop.ai/…"}'
+bash scripts/quote.sh  --ai-tool background-removal '{"image_url":"https://storage.zooop.ai/…"}'
+```
+
+## How model selection works (raw path)
 
 Pick a (type, subType) pair by **what the user wants to do**, not by what
 inputs they happen to provide. The same image + prompt combination can
@@ -227,17 +261,40 @@ above), and all other video subtypes (`motion-control`, `first-last-frame`,
 `audio-lipsync`, `extend-video`, `video-edit`), use **`models[0]`** from
 `/v1/models` — pre-sorted, first row is the recommended default.
 
+## Reference image → prompt (`POST /v1/describe-image`)
+
+Turn a user-supplied reference image into a ready-to-feed prompt. Useful
+when the user pastes "make something like THIS" — get a structured prompt
+back, then plug it into a video / image submit.
+
+```bash
+bash scripts/describe.sh <https://storage.zooop.ai/…>
+# → { "credits": 1, "overallDescription": "A vibrant ...", "subject": "...",
+#     "composition": "...", "style": "...", "lighting": "...", "palette": "...",
+#     "mood": "...", "camera": "..." }
+```
+
+- Input MUST be a ZOOOP CDN URL (returned by `/v1/uploads`). Foreign URLs are
+  rejected — pipe local files through `upload.sh` first.
+- Costs 1 credit per call. Upstream / parse failures auto-refund.
+- `overallDescription` is the canonical one-paragraph prompt; other fields
+  are best-effort and may be empty when the model can't tell.
+- Per-PAT rate-limited to 10 / min (vision LLM is expensive).
+
 ## Endpoints
 
 | Method | Path                       | What                                       |
 | ------ | -------------------------- | ------------------------------------------ |
 | GET    | `/v1/me`                   | Self-introspection                         |
 | GET    | `/v1/models`               | List public models by `type` × `subtype`   |
-| POST   | `/v1/quote`                | Price a task (no side effects)             |
-| POST   | `/v1/tasks`                | Submit a generation                        |
+| GET    | `/v1/ai-tools`             | List curated AI tools (optional `?type=image\|video`) |
+| GET    | `/v1/ai-tools/{slug}`      | Full param schema for one tool             |
+| POST   | `/v1/quote`                | Price a task (accepts `interfaceId` OR `aiTool`) |
+| POST   | `/v1/tasks`                | Submit a generation (accepts `interfaceId` OR `aiTool`) |
 | GET    | `/v1/tasks/{id}`           | Poll status / outputs                      |
 | POST   | `/v1/uploads`              | Upload a file (raw body + `Content-Type`)  |
 | GET    | `/v1/uploads/{uploadId}`   | Poll async (video) upload moderation       |
+| POST   | `/v1/describe-image`       | Reference image → structured prompt (1 credit) |
 
 Full request / response shapes live in `references/api-docs.md`.
 
@@ -324,9 +381,9 @@ schema: `references/api-docs.md` → `GET /v1/me`.
 ## Rate limits
 
 Per-PAT, 60s sliding window. Headline: `tasks 60/min`, `quote 120/min`,
-`uploads 30/min`, `me / upload-poll 120/min`. `/models` and `/tasks/{id}`
-are unbounded. `429` carries `Retry-After`. Full table:
-`references/api-docs.md` → "Limits".
+`uploads 30/min`, `me / upload-poll / ai-tools 120/min`, `describe-image
+10/min`. `/models` and `/tasks/{id}` are unbounded. `429` carries
+`Retry-After`. Full table: `references/api-docs.md` → "Limits".
 
 ## What this skill does NOT do
 

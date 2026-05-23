@@ -211,6 +211,80 @@ sub-credit rates. `typicalPrice` is a coarse ballpark only — call
 `POST /v1/quote` (below) with the exact payload you'd submit to get the
 authoritative number.
 
+### `GET /v1/ai-tools[?type=image|video]`
+
+List active AI tools — admin-curated recipes that pre-bind a model + version
++ tuned params for a specific outcome (background removal, age modification,
+style transfer, video upscale, etc.). Agents submit by stable `slug` and
+supply only the recipe's visible inputs instead of configuring the raw
+underlying interface.
+
+Optional `?type=image|video` filters by media type. Other values return 400
+`invalid_type`. There is **no** `subtype` query — the recipe's `subType`
+field is admin free-form ("特效", "动作模仿") and not a filter axis.
+
+Exposure rule: a tool appears iff (a) `recipe.isActive = true` and (b) its
+underlying interface is still enabled. Unlike `/v1/models`, the sidebar
+taxonomy allowlist does NOT apply here — admin curation of the recipe is
+itself the exposure signal, and many tools intentionally bind off-taxonomy
+interfaces.
+
+Response:
+
+```json
+{
+  "aiTools": [
+    {
+      "slug": "background-removal",
+      "name": "Background Removal",
+      "mediaType": "image",
+      "subType": "",
+      "summary": "Remove the background and keep only the subject.",
+      "coverUrl": "https://storage.zooop.ai/...",
+      "tags": ["NEW"],
+      "params": [
+        { "id": "image_url", "type": "image_url", "required": true, "displayName": "" }
+      ],
+      "typicalPrice": { "typicalCredits": 2, "unit": "image" }
+    },
+    {
+      "slug": "style-transfer",
+      "name": "Style Transfer",
+      "mediaType": "image",
+      "params": [
+        { "id": "image_url", "type": "image_url", "required": true },
+        { "id": "target_style", "type": "enum", "required": true,
+          "options": [
+            { "value": "impressionism", "label": "Impressionism" },
+            { "value": "cubism", "label": "Cubism" }
+          ]
+        },
+        { "id": "aspect_ratio.ratio", "type": "aspect_ratio", "required": true,
+          "options": ["1:1","16:9","9:16","4:3","3:4"] }
+      ],
+      "typicalPrice": { "typicalCredits": 6, "unit": "image" }
+    }
+  ]
+}
+```
+
+The `params[]` shape mirrors `/v1/models` exactly — same `id` / `type` /
+`required` / `options` / `default` / `constraints` semantics. Voice-type
+params on TTS-style tools expand options to `{value, label, previewUrl?}`
+identical to `/v1/models`. Fields the agent doesn't need (mapping internals,
+preset overrides, hidden / fixed params) are stripped.
+
+### `GET /v1/ai-tools/{slug}`
+
+Fetch one AI tool by stable slug. Same shape as a single entry from the
+list endpoint. Returns 404 `unknown_ai_tool` for unknown / inactive slugs
+and for slugs whose interface is no longer enabled.
+
+```bash
+curl -fsS -H "Authorization: Bearer $ZOOOP_API_KEY" \
+  "https://api.zooop.ai/v1/ai-tools/background-removal"
+```
+
 ### `POST /v1/quote`
 
 Price a hypothetical task without submitting. Same request body as
@@ -218,15 +292,24 @@ Price a hypothetical task without submitting. Same request body as
 No credits are charged, no DB row is created, no capacity is reserved —
 safe to repeat freely.
 
-Body:
+Body — **one of two shapes**, mutually exclusive:
 
 ```json
+// (a) Raw model
 {
   "interfaceId": "<uuid from /models>",
   "versionId": "standard",
   "params": { "prompt": "…", "duration": 5 }
 }
+
+// (b) AI tool (curated recipe)
+{
+  "aiTool": "<slug from /ai-tools>",
+  "params": { "image_url": "https://storage.zooop.ai/…" }
+}
 ```
+
+Sending both `aiTool` and `interfaceId` returns 400 `invalid_payload`.
 
 Response:
 
@@ -263,21 +346,36 @@ Errors mirror `POST /v1/tasks` for the same payload-validation paths
 
 ### `POST /v1/tasks`
 
-Submit one generation task by model id.
+Submit one generation task. Two body shapes are accepted — mutually exclusive.
 
-Body:
+Body — **raw model path**:
 
 ```json
 {
-  "interfaceId": "<uuid from /models>",
+  "interfaceId": "<uuid from /v1/models>",
   "versionId": "standard",
   "params": { "prompt": "…", "image_url": "…", "duration": 5 }
 }
 ```
 
-The keys allowed in `params` come from the model's `params[]` spec returned
-by `/models`. Param values are validated server-side via the same path the
-web `/api/ai/execute` route uses.
+Body — **AI tool path** (curated recipe):
+
+```json
+{
+  "aiTool": "<slug from /v1/ai-tools>",
+  "params": { "image_url": "https://storage.zooop.ai/…" }
+}
+```
+
+On the AI-tool path the server resolves slug → recipe → underlying
+interfaceId + versionId, merges your `params` with the recipe's
+fixedParams / defaultParams / customParams, validates the merged shape,
+and applies the recipe's pricing override. The keys allowed in `params`
+come from the tool's `params[]` spec returned by `/v1/ai-tools/{slug}`.
+
+On the raw path, the keys come from the model's `params[]` spec returned
+by `/v1/models`. Param values are validated server-side via the same path
+the web `/api/ai/execute` route uses.
 
 **Optional header** `Idempotency-Key: <≤256 chars>` — repeat submissions
 with the same `(token, key)` within 24 hours return the original `taskId`
@@ -293,15 +391,16 @@ Errors:
 
 | HTTP | code                       | Cause                                       |
 | ---- | -------------------------- | ------------------------------------------- |
-| 400  | `invalid_payload`          | Missing required input or bad shape         |
+| 400  | `invalid_payload`          | Missing required input, bad shape, OR both `aiTool` and `interfaceId` set |
 | 400  | `missing_required_params`  | Model `required: true` params absent; `error.params` lists each with type / options / default |
 | 400  | `invalid_idempotency_key`  | `Idempotency-Key` header missing or > 256 chars |
 | 401  | `missing_token` / `invalid_token` | Missing or revoked / expired PAT     |
 | 402  | `arrears`                  | Account in arrears                          |
 | 402  | `token_daily_cap_exceeded` | This task's cost would breach the token's daily cap (post-pricing precise check) |
-| 403  | `model_not_public`         | Model exists but isn't on the public API surface |
+| 403  | `model_not_public`         | Raw-path model exists but isn't on the public API surface (does not apply to AI-tool path) |
 | 403  | `account_banned`           | Token's owner is banned                     |
 | 404  | `unknown_model`            | Bogus `interfaceId` or disabled model       |
+| 404  | `unknown_ai_tool`          | Bogus `aiTool` slug, inactive recipe, or underlying interface disabled |
 | 422  | `moderation_blocked`       | Text prompt failed content moderation       |
 | 422  | `token_project_unbound`    | PAT's bound project was deleted — revoke + recreate |
 | 429  | `rate_limited`             | Per-token rate-limit ceiling (default 60 req/min) |
@@ -440,6 +539,57 @@ Response shapes:
 Ownership: the upload id can only be polled by the PAT that created it.
 Other tokens (even from the same user account) get 404 `unknown_upload`.
 
+### `POST /v1/describe-image`
+
+Analyse a reference image and return a structured prompt suitable for feeding
+back into a generator (`subject` / `composition` / `style` / `lighting` /
+`palette` / `mood` / `camera`, plus a single flowing `overallDescription`
+paragraph).
+
+Body:
+
+```json
+{ "imageUrl": "https://storage.zooop.ai/<userId>/<projectId>/<uuid>.png" }
+```
+
+- `imageUrl` is **required** and MUST be a ZOOOP CDN URL (i.e. one returned
+  by `POST /v1/uploads`). Foreign URLs are rejected — this avoids SSRF and
+  guarantees the input has already been moderated.
+
+Response:
+
+```json
+{
+  "credits": 1,
+  "subject": "A young woman with light skin in her 20s",
+  "composition": "Centered portrait, eye-level framing",
+  "style": "Soft photographic realism with film grain",
+  "lighting": "Warm window light from the left, gentle shadows",
+  "palette": "Muted earth tones with desaturated greens",
+  "mood": "Contemplative and serene",
+  "camera": "Shot at 50mm with shallow depth of field",
+  "overallDescription": "A young woman with light skin in her 20s, ..."
+}
+```
+
+- `overallDescription` is the canonical "ready-to-use" field — drop it
+  straight into a generator's `prompt` param. The other dimension fields
+  are best-effort and may be empty strings depending on the active vision
+  model. Treat `overallDescription` as the only field with strong stability.
+- `credits: 1` is charged on success. Upstream / parse failures auto-refund.
+- `camera` may be `null` for compositionally minimal images.
+
+Errors:
+
+| HTTP | code                    | Cause                                                    |
+| ---- | ----------------------- | -------------------------------------------------------- |
+| 400  | `invalid_payload`       | `imageUrl` missing or not on a ZOOOP CDN host            |
+| 402  | `insufficient_credits`  | Balance below 1 credit (no refund issued — nothing was charged) |
+| 422  | `policy_violation`      | Vision model refused the image on content policy (refund issued) |
+| 429  | `rate_limited`          | Default 10 / min per PAT                                 |
+| 429  | `upstream_rate_limited` | Upstream LLM rate-limited us (refund issued — retry with backoff) |
+| 503  | `vision_unavailable`    | Vision service unreachable (refund issued)               |
+
 ## Limits
 
 - **Rate limit** (per PAT, 60-second sliding window):
@@ -448,6 +598,8 @@ Other tokens (even from the same user account) get 404 `unknown_upload`.
   - `POST /v1/uploads` — 30 req/min
   - `GET /v1/uploads/{id}` — 120 req/min
   - `GET /v1/me` — 120 req/min
+  - `GET /v1/ai-tools` and `GET /v1/ai-tools/{slug}` — 120 req/min
+  - `POST /v1/describe-image` — 10 req/min (vision LLM is expensive)
   - `GET /v1/models`, `GET /v1/tasks/{id}` — unbounded
   - 429 responses carry `Retry-After` (seconds).
 - **Tokens per user**: max 10 active. Revoke an old one to create a new one.
