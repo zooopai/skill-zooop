@@ -43,24 +43,24 @@ PAT's bound project.
 
 ## Two paths: raw model vs AI tool
 
-ZOOOP exposes generation in **two flavours**. Pick once per task:
+**Default to raw models.** AI tools are a deliberately narrow surface for
+specialized capabilities that raw text-to-image / text-to-video models
+CAN'T replicate — chiefly precise background removal and image / video
+upscaling. For everything else (style transfer, edits, age changes,
+character animations, etc.) prefer a raw model: GPT Image 2 / Nanobanana
+handle most prompt-driven edits more flexibly AND cheaper.
 
 | Path | When | How |
 | --- | --- | --- |
-| **Raw model** (`interfaceId` + `versionId`) | The user named a brand / quality tier ("用 Seedance 2", "highest quality") or you need full param control | `GET /v1/models?type=…&subtype=…` → submit with `interfaceId` + `versionId` + `params` |
-| **AI tool** (`aiTool` slug) | The user described an **outcome** that maps to a curated recipe — "去背景", "证件照", "动作模仿", "图片放大", "AI 修复老照片" | `GET /v1/ai-tools` → submit with `aiTool: <slug>` + the recipe's `params[]` |
+| **Raw model** (`interfaceId` + `versionId`) | Default. Text-driven generation, prompt-driven edits, anything where you'd write a prompt | `GET /v1/models?type=…&subtype=…` → submit with `interfaceId` + `versionId` + `params` |
+| **AI tool** (`aiTool` slug) | Specialized non-prompt-driven capabilities only — currently background removal + image/video upscale. Browse `GET /v1/ai-tools` to see what's actually exposed | `GET /v1/ai-tools` → submit with `aiTool: <slug>` + the tool's `params[]` |
 
-AI tools are admin-curated recipes: model + version + fixed params + tuned
-defaults all pre-wired. The agent supplies only the visible inputs (often
-just one image, sometimes a style prompt). Pricing may differ from the raw
-underlying model — `typicalPrice` on the tool is authoritative for tools.
-
-Default behaviour: **try AI tools first when the user phrased a task in
-outcome terms**. Fall back to raw models when nothing matches or the user
-explicitly named a model.
+AI tools are admin-curated and admin-gated — only a small allowlist appears
+in `/v1/ai-tools`. If your task isn't on that list, don't try to force it
+through; use a raw model with a tailored prompt.
 
 ```bash
-# Browse curated tools
+# Browse the (small) curated catalog
 bash scripts/ai-tools.sh                 # all
 bash scripts/ai-tools.sh image           # only image
 bash scripts/ai-tools.sh video           # only video

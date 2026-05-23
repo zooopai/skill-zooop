@@ -223,11 +223,13 @@ Optional `?type=image|video` filters by media type. Other values return 400
 `invalid_type`. There is **no** `subtype` query — the recipe's `subType`
 field is admin free-form ("特效", "动作模仿") and not a filter axis.
 
-Exposure rule: a tool appears iff (a) `recipe.isActive = true` and (b) its
-underlying interface is still enabled. Unlike `/v1/models`, the sidebar
-taxonomy allowlist does NOT apply here — admin curation of the recipe is
-itself the exposure signal, and many tools intentionally bind off-taxonomy
-interfaces.
+Exposure rule: a tool appears iff (a) `recipe.isActive = true`, (b) the
+recipe carries the `api` tag (admin opt-in — fail-closed by default), and
+(c) its underlying interface is still enabled. This is a deliberately
+narrow surface: most /tools/* recipes are prompt-wrappers around generic
+text-to-image models that an agent could replicate cheaper by calling the
+raw model directly. Only the tools that genuinely add capability beyond
+`/v1/models` (background removal, upscalers, etc.) are tagged.
 
 Response:
 
