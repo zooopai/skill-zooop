@@ -31,8 +31,11 @@ plaintext is shown ONCE at creation; afterwards only the leading prefix is
 visible in the settings UI. To rotate, create a new token and revoke the old
 one (revocation is immediate).
 
-The token's user owns every task it submits and every file it uploads.
-Credits are debited from that user's personal balance.
+A token is either **personal** (created at the URL above) or **team** (issued
+by a team owner/admin in the team admin → API Keys tab). Credits are debited
+from that token's wallet — the user's personal balance for a personal token,
+or the team's shared credit pool for a team token. The endpoints are
+identical; `GET /v1/me` reports which wallet funds the token.
 
 **Project binding**: every PAT is bound to one project at creation time and
 cannot be re-bound. Tasks submitted via the PAT land under that project;
@@ -125,9 +128,11 @@ Field notes:
 - `project.id` / `project.name` are both `null` (with `project.bound: false`)
   when the bound project was deleted — submits will fail with
   `token_project_unbound` until the token is rotated.
-- `user.creditBalance` is the account-level wallet that funds tasks. Even
-  with `creditsRemainingToday > 0`, an empty wallet still blocks expensive
-  submits.
+- **Wallet** — exactly one key is present: `user: { creditBalance }` for a
+  **personal** token, or `team: { id, creditBalance }` for a **team** token
+  (the team's shared pool; a team token never exposes its creator's personal
+  balance). This is the wallet that funds tasks — even with
+  `creditsRemainingToday > 0`, an empty wallet still blocks expensive submits.
 - `limits.*` reflect the current per-PAT rate-limit numbers. Honor them.
 
 All PATs grant full access to every `/v1/*` endpoint.
@@ -182,6 +187,7 @@ Response shape:
 | ------ | ------------------ | ------------------------------- |
 | image  | default            | Image generator                 |
 | image  | edit-image         | Image editor                    |
+| image  | image-svg          | SVG generator (text/image-to-vector) |
 | video  | text-ref           | Video generator                 |
 | video  | motion-control     | Motion control (image-to-video) |
 | video  | first-last-frame   | First / last frame video        |
@@ -403,7 +409,7 @@ Errors:
 | 403  | `account_banned`           | Token's owner is banned                     |
 | 404  | `unknown_model`            | Bogus `interfaceId` or disabled model       |
 | 404  | `unknown_ai_tool`          | Bogus `aiTool` slug, inactive recipe, or underlying interface disabled |
-| 422  | `moderation_blocked`       | Text prompt failed content moderation       |
+| 422  | `moderation_blocked`       | Text or image violates content policy       |
 | 422  | `token_project_unbound`    | PAT's bound project was deleted — revoke + recreate |
 | 429  | `rate_limited`             | Per-token rate-limit ceiling (default 60 req/min) |
 | 429  | `token_daily_cap_reached`  | Token's `dailyCreditCap` already met before this call (coarse pre-check) |
@@ -483,8 +489,7 @@ toward your storage quota.
 }
 ```
 
-**Video — asynchronous via Aliyun video moderation**. Returns `202` with an
-upload id:
+**Video — asynchronous**. Returns `202` with an upload id:
 
 ```json
 {
@@ -498,7 +503,7 @@ Poll `GET /v1/uploads/{uploadId}` until you get a terminal status.
 Recommended cadence: 5s first poll, then 10–20s. Most clips resolve in
 under a minute; the workflow has a 30-minute deadline.
 
-**Image moderation block** (image content violates the policy):
+**Image rejected by content policy**:
 
 ```json
 {
@@ -551,12 +556,20 @@ paragraph).
 Body:
 
 ```json
-{ "imageUrl": "https://storage.zooop.ai/<userId>/<projectId>/<uuid>.png" }
+{
+  "imageUrl": "https://storage.zooop.ai/<userId>/<projectId>/<uuid>.png",
+  "language": "zh"
+}
 ```
 
 - `imageUrl` is **required** and MUST be a ZOOOP CDN URL (i.e. one returned
   by `POST /v1/uploads`). Foreign URLs are rejected — this avoids SSRF and
-  guarantees the input has already been moderated.
+  guarantees the input has already been validated.
+- `language` is **optional** — a locale code (`zh`, `zh-TW`, `ja`, `fr`,
+  `es`, `de`, `pt`, `ru`, … ) that sets the output language. Every field,
+  including `overallDescription`, is written in it; pass the locale the user
+  is working in so the result is readable to them. Unknown / omitted →
+  English.
 
 Response:
 
@@ -578,7 +591,8 @@ Response:
   straight into a generator's `prompt` param. The other dimension fields
   are best-effort and may be empty strings depending on the active vision
   model. Treat `overallDescription` as the only field with strong stability.
-- `credits: 1` is charged on success. Upstream / parse failures auto-refund.
+- `credits: 1` is charged on success (failures are refunded — see the error
+  table below).
 - `camera` may be `null` for compositionally minimal images.
 
 Errors:
@@ -601,7 +615,7 @@ Errors:
   - `GET /v1/uploads/{id}` — 120 req/min
   - `GET /v1/me` — 120 req/min
   - `GET /v1/ai-tools` and `GET /v1/ai-tools/{slug}` — 120 req/min
-  - `POST /v1/describe-image` — 10 req/min (vision LLM is expensive)
+  - `POST /v1/describe-image` — 10 req/min
   - `GET /v1/models`, `GET /v1/tasks/{id}` — unbounded
   - 429 responses carry `Retry-After` (seconds).
 - **Tokens per user**: max 10 active. Revoke an old one to create a new one.
@@ -609,21 +623,25 @@ Errors:
   enforcement points — coarse pre-check (`token_daily_cap_reached`, 429)
   and precise post-pricing check (`token_daily_cap_exceeded`, 402,
   prevents over-cap submission even when current spend < cap).
-- **Concurrency**: per-user `maxConcurrency` (default 3) caps how many
-  PAT-submitted tasks run in parallel — excess queues in FIFO order and
-  drains as earlier tasks complete. Rate-limit and concurrency are
-  orthogonal: you can submit 60/min but only 3 will execute at once.
-- **Content moderation**: identical to web — Aliyun text moderation runs
-  before credit deduction; AIGC image outputs are moderated post-generation;
-  uploaded images are moderated synchronously on `POST /v1/uploads`;
-  uploaded videos are moderated asynchronously via the poll route.
+- **Concurrency**: `maxConcurrency` (personal token → the user's, default 3;
+  team token → the team's shared pool) caps how many tasks run in parallel —
+  excess queues in FIFO order and drains as earlier tasks complete.
+  Rate-limit and concurrency are orthogonal: you can submit 60/min but only a
+  few run at once.
+- **Content policy**: prompts are checked before any credits are charged;
+  uploaded images are checked synchronously on `POST /v1/uploads`, uploaded
+  videos asynchronously via the poll route. Rejections surface as
+  `moderation_blocked`.
 - **Upload size**: 100 MB hard ceiling per file (Cloudflare request-body
   limit). Larger files: use the Web UI and pass the URL.
 
 ## Out of scope
 
-- **Team / organization workspaces**: PATs are personal-only.
-- **Project management**: PATs are bound to one project at creation. To
+- **Workspace management**: a token's scope (personal vs team) and bound
+  project are fixed at creation in the web UI — the API can't switch them. A
+  team token is issued by a team owner/admin and spends the team's shared
+  credits; otherwise the endpoints are identical to a personal token.
+- **Project management**: tokens are bound to one project at creation. To
   switch projects, revoke and create a new token.
 - **Canvases / story timeline**: the API exposes single-shot generation only.
 - **Streaming progress**: poll instead.
