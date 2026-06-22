@@ -160,6 +160,10 @@ server-side at submit time and echoed in `creditsCharged`.
    bash scripts/submit.sh <interfaceId> <versionId> '<params-json>'
    # → { "taskId": "...", "status": "queued", "modelId": "...", "versionId": "..." }
   ```
+   `submit.sh` attaches an `Idempotency-Key` (default `sha256(body)`), so a
+   submit that times out is safe to recover by **re-running the identical
+   command** — see "Idempotency". Never tweak the params on a timeout retry to
+   "avoid a duplicate"; that changes the key and creates a real duplicate.
 6. **Poll until terminal** (`succeeded` / `failed` / `cancelled`):
   ```bash
    bash scripts/poll.sh <taskId>
@@ -363,11 +367,31 @@ Up to 3 attempts with exponential backoff (1s → 3s → 9s), honor
 `422 token_project_unbound`. Full retry table + outage-diagnostic curls:
 `references/api-docs.md` → "Transient errors".
 
-## Idempotency (optional)
+**Submit timed out with no response (curl exit 28 / outer kill)?** The task
+may already exist — `submit.sh` likely created it before the connection
+stalled. Recover by **re-running the exact same `submit.sh` command** (the
+`Idempotency-Key` returns the original `taskId`), or reconcile with
+`GET /v1/tasks/{id}` if you captured an id. Never submit a fresh, modified
+request — that double-charges.
 
-Pass `Idempotency-Key: <opaque string ≤ 256 chars>` on `POST /v1/tasks`.
-Server caches the key for 24h; repeat submits with the same `(token, key)`
-return the original `taskId` plus `"idempotent": true`. Stripe semantics.
+## Idempotency (automatic on submit)
+
+`POST /v1/tasks` is the only retryable **write**, and a slow-but-successful
+submit (task created + credits charged) can still time out before the
+response reaches you. So `submit.sh` always sends an `Idempotency-Key`
+(default `sha256(body)`). The server caches it 24h; a repeat submit with the
+same `(token, key)` returns the original `taskId` plus `"idempotent": true`
+instead of creating — and charging for — a duplicate. Stripe semantics.
+
+Rules:
+- **Retry a timed-out submit by re-running the identical command.** Same key
+  → same task → no double charge.
+- **Don't add "uniqueness" to params to dodge duplicates** — that's backwards;
+  it changes the hash and produces a genuine duplicate.
+- To intentionally launch N tasks from identical params, set a distinct
+  `ZOOOP_IDEMPOTENCY_KEY` per submission.
+- Calling the raw endpoint yourself? Set the `Idempotency-Key` header
+  manually — the dedup only works if you do.
 
 ## Rate limits
 

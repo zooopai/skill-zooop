@@ -385,9 +385,17 @@ On the raw path, the keys come from the model's `params[]` spec returned
 by `/v1/models`. Param values are validated server-side via the same path
 the web `/api/ai/execute` route uses.
 
-**Optional header** `Idempotency-Key: <≤256 chars>` — repeat submissions
-with the same `(token, key)` within 24 hours return the original `taskId`
-plus `"idempotent": true` instead of creating a duplicate. Stripe semantics.
+**Header** `Idempotency-Key: <1–256 chars>` — repeat submissions with the
+same `(token, key)` within 24 hours return the original `taskId` plus
+`"idempotent": true` instead of creating a duplicate. Stripe semantics.
+
+Strongly recommended on every submit: a slow-but-successful request (task
+created + credits charged) can still time out before the response arrives,
+and a blind retry would double-charge. `scripts/submit.sh` sets the header
+automatically (default `sha256(body)`); if you call this endpoint directly,
+send your own stable key and reuse it verbatim on retry. The header is
+optional only in the sense that omitting it is allowed — but then duplicate
+protection is off.
 
 Response:
 
@@ -401,7 +409,7 @@ Errors:
 | ---- | -------------------------- | ------------------------------------------- |
 | 400  | `invalid_payload`          | Missing required input, bad shape, OR both `aiTool` and `interfaceId` set |
 | 400  | `missing_required_params`  | Model `required: true` params absent; `error.params` lists each with type / options / default |
-| 400  | `invalid_idempotency_key`  | `Idempotency-Key` header missing or > 256 chars |
+| 400  | `invalid_idempotency_key`  | `Idempotency-Key` header present but empty or > 256 chars |
 | 401  | `missing_token` / `invalid_token` | Missing or revoked / expired PAT     |
 | 402  | `arrears`                  | Account in arrears                          |
 | 402  | `token_daily_cap_exceeded` | This task's cost would breach the token's daily cap (post-pricing precise check) |
@@ -668,6 +676,17 @@ transient class with exponential backoff before declaring an outage.
 
 **Pattern:** up to 3 attempts, exponential backoff 1s → 3s → 9s, honor
 `Retry-After`. If all 3 fail, surface the error.
+
+**Special case — `POST /v1/tasks` that times out with no response body**
+(curl exit `28`, or an outer command-timeout hard-kill with no exit code):
+the submit path runs cold-start + media probing + workflow dispatch
+synchronously, so the task is often already created and charged by the time
+the connection stalls — most visible on the *first* submit of a session.
+Always submit with an `Idempotency-Key` (the bundled `submit.sh` does this by
+default). Then a timeout is safe to retry **with the same key + same body** —
+the server returns the original `taskId` (`"idempotent": true`) rather than
+duplicating. If you have a candidate id, `GET /v1/tasks/{id}` to reconcile.
+Do not re-submit a modified request after a timeout.
 
 **Diagnostic before declaring outage:**
 
