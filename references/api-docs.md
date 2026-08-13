@@ -293,6 +293,75 @@ curl -fsS -H "Authorization: Bearer $ZOOOP_API_KEY" \
   "https://api.zooop.ai/v1/ai-tools/background-removal"
 ```
 
+### `GET /v1/templates[?type=image|video]`
+
+List the gallery templates published at `/templates/{slug}` — a tuned prompt
+plus a bound model + version, run by stable `slug`. Where an AI tool adds a
+capability the raw models lack, a template packages a *look*: superhero
+poster, future baby, action figure, and so on. You supply only the inputs it
+leaves open (usually a photo and a word or two); the prompt itself is baked
+in and cannot be overridden.
+
+Optional `?type=image|video` filters by media type. Other values return 400
+`invalid_type`. No `subtype` query — same reason as `/v1/ai-tools`.
+
+Exposure rule: every template with `status = approved` + `isActive` + an
+enabled interface, **official and community alike** — the same set the public
+gallery runs. Unlike `/v1/ai-tools` there is no per-row opt-in tag, because a
+template IS the user-facing product rather than an internal wrapper. Running
+a community template attributes its creator exactly as the website does.
+
+Response:
+
+```json
+{
+  "templates": [
+    {
+      "slug": "superhero-movie-poster",
+      "name": "Superhero Movie Poster",
+      "mediaType": "image",
+      "subType": "",
+      "summary": "One photo becomes a blockbuster teaser poster.",
+      "coverUrl": "https://storage.zooop.ai/global/website/templates/superhero-movie-poster-cover.webp",
+      "tags": ["poster", "movie"],
+      "params": [
+        { "id": "aspect_ratio", "type": "aspect_ratio", "default": "2:3",
+          "options": ["1:1", "2:3", "3:2", "9:16"], "required": true },
+        { "id": "image_urls", "type": "image_urls", "displayName": "Your photo",
+          "constraints": { "maxCount": 1 } },
+        { "id": "hero_name", "type": "text", "displayName": "Poster title",
+          "default": "NIGHTFALL", "constraints": { "maxLength": 28 } }
+      ],
+      "official": true,
+      "typicalPrice": { "typicalCredits": 5, "unit": "image" }
+    }
+  ]
+}
+```
+
+`params[]` has the same shape as `/v1/models` and `/v1/ai-tools`. Two things
+to notice on templates specifically:
+
+- Params the template fixes (`prompt`, `quality`, …) are **absent** — sending
+  one back returns 400 `invalid_payload` (`Param "prompt" is fixed by
+  template`). Don't try to steer a template by prompt; pick a different
+  template or call the raw model.
+- Template-specific inputs (e.g. `hero_name`) are ordinary ids you submit
+  like any other param. Their values get interpolated into the fixed prompt
+  server-side; leaving one out falls back to its `default`.
+
+### `GET /v1/templates/{slug}`
+
+Fetch one template by stable slug — the same slug as the website URL
+`https://zooop.ai/templates/image/{slug}`. Same shape as a single list entry.
+Returns 404 `unknown_template` for unknown / draft / pending / rejected /
+inactive slugs and for slugs whose interface is no longer enabled.
+
+```bash
+curl -fsS -H "Authorization: Bearer $ZOOOP_API_KEY" \
+  "https://api.zooop.ai/v1/templates/superhero-movie-poster"
+```
+
 ### `POST /v1/quote`
 
 Price a hypothetical task without submitting. Same request body as
@@ -300,7 +369,7 @@ Price a hypothetical task without submitting. Same request body as
 No credits are charged, no DB row is created, no capacity is reserved —
 safe to repeat freely.
 
-Body — **one of two shapes**, mutually exclusive:
+Body — pick one shape:
 
 ```json
 // (a) Raw model
@@ -315,9 +384,16 @@ Body — **one of two shapes**, mutually exclusive:
   "aiTool": "<slug from /ai-tools>",
   "params": { "image_url": "https://storage.zooop.ai/…" }
 }
+
+// (c) Template (gallery preset)
+{
+  "template": "<slug from /templates>",
+  "params": { "image_urls": ["https://storage.zooop.ai/…"], "hero_name": "DAFU" }
+}
 ```
 
-Sending both `aiTool` and `interfaceId` returns 400 `invalid_payload`.
+Body — **one of three shapes**, mutually exclusive. Sending more than one of
+`interfaceId` / `aiTool` / `template` returns 400 `invalid_payload`.
 
 Response:
 
@@ -354,7 +430,8 @@ Errors mirror `POST /v1/tasks` for the same payload-validation paths
 
 ### `POST /v1/tasks`
 
-Submit one generation task. Two body shapes are accepted — mutually exclusive.
+Submit one generation task. Three body shapes are accepted — mutually
+exclusive.
 
 Body — **raw model path**:
 
@@ -375,11 +452,30 @@ Body — **AI tool path** (curated recipe):
 }
 ```
 
+Body — **template path** (gallery preset):
+
+```json
+{
+  "template": "<slug from /v1/templates>",
+  "params": {
+    "image_urls": ["https://storage.zooop.ai/…"],
+    "hero_name": "DAFU"
+  }
+}
+```
+
 On the AI-tool path the server resolves slug → recipe → underlying
 interfaceId + versionId, merges your `params` with the recipe's
 fixedParams / defaultParams / customParams, validates the merged shape,
 and applies the recipe's pricing override. The keys allowed in `params`
 come from the tool's `params[]` spec returned by `/v1/ai-tools/{slug}`.
+
+The template path works the same way — slug → template → interfaceId +
+versionId, your `params` merged over the template's fixed / default / custom
+params, priced off the bound interface version plus the template's credit
+markup. Allowed keys come from `/v1/templates/{slug}`. The resulting task
+carries the template attribution, so a community creator is credited exactly
+as they would be from the website.
 
 On the raw path, the keys come from the model's `params[]` spec returned
 by `/v1/models`. Param values are validated server-side via the same path
@@ -407,16 +503,17 @@ Errors:
 
 | HTTP | code                       | Cause                                       |
 | ---- | -------------------------- | ------------------------------------------- |
-| 400  | `invalid_payload`          | Missing required input, bad shape, OR both `aiTool` and `interfaceId` set |
+| 400  | `invalid_payload`          | Missing required input, bad shape, an attempt to set a param the tool / template fixes, OR more than one of `interfaceId` / `aiTool` / `template` set |
 | 400  | `missing_required_params`  | Model `required: true` params absent; `error.params` lists each with type / options / default |
 | 400  | `invalid_idempotency_key`  | `Idempotency-Key` header present but empty or > 256 chars |
 | 401  | `missing_token` / `invalid_token` | Missing or revoked / expired PAT     |
 | 402  | `arrears`                  | Account in arrears                          |
 | 402  | `token_daily_cap_exceeded` | This task's cost would breach the token's daily cap (post-pricing precise check) |
-| 403  | `model_not_public`         | Raw-path model exists but isn't on the public API surface (does not apply to AI-tool path) |
+| 403  | `model_not_public`         | Raw-path model exists but isn't on the public API surface (does not apply to AI-tool / template paths) |
 | 403  | `account_banned`           | Token's owner is banned                     |
 | 404  | `unknown_model`            | Bogus `interfaceId` or disabled model       |
 | 404  | `unknown_ai_tool`          | Bogus `aiTool` slug, inactive recipe, or underlying interface disabled |
+| 404  | `unknown_template`         | Bogus `template` slug, template not approved / inactive, or underlying interface disabled |
 | 422  | `moderation_blocked`       | Text or image violates content policy       |
 | 422  | `token_project_unbound`    | PAT's bound project was deleted — revoke + recreate |
 | 429  | `rate_limited`             | Per-token rate-limit ceiling (default 60 req/min) |
@@ -623,6 +720,7 @@ Errors:
   - `GET /v1/uploads/{id}` — 120 req/min
   - `GET /v1/me` — 120 req/min
   - `GET /v1/ai-tools` and `GET /v1/ai-tools/{slug}` — 120 req/min
+  - `GET /v1/templates` and `GET /v1/templates/{slug}` — 120 req/min (own bucket)
   - `POST /v1/describe-image` — 10 req/min
   - `GET /v1/models`, `GET /v1/tasks/{id}` — unbounded
   - 429 responses carry `Retry-After` (seconds).

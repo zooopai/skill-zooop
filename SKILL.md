@@ -3,8 +3,10 @@ name: zooop
 description: |
   Generate or edit images / videos / audio via the ZOOOP AI platform — t2i,
   i2i, t2v, i2v, lipsync, upscale, remove-background, TTS, voice-clone,
-  sound-effect, music. Use whenever the user asks to generate, create, make,
-  edit, or transform any of those media types.
+  sound-effect, music, plus ZOOOP's published one-click templates (superhero
+  poster, future baby, action figure, …) run by slug. Use whenever the user
+  asks to generate, create, make, edit, or transform any of those media
+  types, or names a ZOOOP template / pastes a zooop.ai/templates link.
 ---
 
 # ZOOOP AI generation
@@ -12,7 +14,7 @@ description: |
 Public REST API host: `https://api.zooop.ai` (override via `$ZOOOP_API_HOST`).
 Auth: `Authorization: Bearer $ZOOOP_API_KEY` on every request.
 
-`scripts/{upload,quote,submit,poll,download,ai-tools,describe}.sh` ship with
+`scripts/{upload,quote,submit,poll,download,ai-tools,templates,describe}.sh` ship with
 this skill. Inline `curl` recipes below work the same way if the bundle isn't
 cloned. Full request / response / error reference:
 [`references/api-docs.md`](./references/api-docs.md) — read it whenever this
@@ -44,20 +46,26 @@ these instructions **verbatim** — do not ask them to paste the token back:
 Tasks and uploads land under the token's bound project. `GET /v1/me` shows
 the active wallet and balance (`user.creditBalance` personal, `team.creditBalance` team).
 
-## Two paths: raw model vs AI tool
+## Three paths: raw model, AI tool, template
 
-**Default to raw models.** AI tools are a deliberately narrow surface for
-specialized capabilities that raw text-to-image / text-to-video models
-CAN'T replicate — chiefly precise background removal and image / video
-upscaling. For everything else (style transfer, edits, age changes,
-character animations, etc.) prefer a raw model: GPT Image 2 / Nanobanana
-handle most prompt-driven edits more flexibly AND cheaper.
+**Default to raw models.** The other two are narrow, deliberate surfaces:
+
+- **AI tools** cover capabilities raw text-to-image / text-to-video models
+  CAN'T replicate — chiefly precise background removal and image / video
+  upscaling. For everything else (style transfer, edits, age changes,
+  character animations, etc.) a raw model is more flexible AND cheaper.
+- **Templates** are the site's one-click looks (superhero poster, future
+  baby, action figure, …). Reach for one when the user names that specific
+  look, or asks for "that viral effect" — the prompt behind it is tuned and
+  hard to reproduce blind. Don't route generic requests through a template:
+  its prompt is fixed and you cannot steer it.
 
 
 | Path                                        | When                                                                                                                                                           | How                                                                                    |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | **Raw model** (`interfaceId` + `versionId`) | Default. Text-driven generation, prompt-driven edits, anything where you'd write a prompt                                                                      | `GET /v1/models?type=…&subtype=…` → submit with `interfaceId` + `versionId` + `params` |
 | **AI tool** (`aiTool` slug)                 | Specialized non-prompt-driven capabilities only — currently background removal + image/video upscale. Browse `GET /v1/ai-tools` to see what's actually exposed | `GET /v1/ai-tools` → submit with `aiTool: <slug>` + the tool's `params[]`              |
+| **Template** (`template` slug)              | The user wants a specific published look ("超英海报", "future baby", "手办"), or hands you a `zooop.ai/templates/…` link. Browse `GET /v1/templates`             | `GET /v1/templates` → submit with `template: <slug>` + the template's `params[]`        |
 
 
 `/v1/ai-tools` is a short curated list. If your task isn't on it, don't force
@@ -66,13 +74,34 @@ it through — use a raw model with a tailored prompt.
 ```bash
 bash scripts/ai-tools.sh [image|video]   # browse catalog, optionally filtered
 bash scripts/ai-tools.sh -s <slug>       # one tool's full param schema
+
+bash scripts/templates.sh [image|video]  # browse every published template
+bash scripts/templates.sh -s <slug>      # one template's full param schema
 ```
 
-Then reuse the raw-path `submit.sh` / `quote.sh`, swapping `<interfaceId> <versionId>` for `--ai-tool <slug>`:
+Then reuse the raw-path `submit.sh` / `quote.sh`, swapping `<interfaceId> <versionId>` for `--ai-tool <slug>` or `--template <slug>`:
 
 ```bash
 bash scripts/submit.sh --ai-tool background-removal '{"image_url":"https://storage.zooop.ai/…"}'
+bash scripts/submit.sh --template superhero-movie-poster \
+  '{"image_urls":["https://storage.zooop.ai/…"],"hero_name":"DAFU"}'
 ```
+
+### Working with templates
+
+- **The slug is the URL.** `https://zooop.ai/templates/image/superhero-movie-poster`
+  → `template: "superhero-movie-poster"`. If the user pastes a template link,
+  take the slug straight from it and skip the catalog browse.
+- **Only send what the template exposes.** `GET /v1/templates/{slug}` lists
+  exactly those params. Anything the template fixes (`prompt`, `quality`, …)
+  is absent from that list, and sending it back is a 400
+  (`Param "prompt" is fixed by template`). A template you can't steer is
+  working as designed — if the user wants a different look, use a raw model.
+- **Template-specific inputs are ordinary params.** e.g. `hero_name` on the
+  superhero poster: pass it in `params` like any other id and it gets woven
+  into the fixed prompt server-side. Omit it and its `default` applies.
+- Both official and community templates are callable, and cost is quoted the
+  same way (`quote.sh --template <slug> …`).
 
 ## How model selection works (raw path)
 
@@ -140,7 +169,9 @@ server-side at submit time and echoed in `creditsCharged`.
         -H "Authorization: Bearer $ZOOOP_API_KEY"
   ```
    Match the user's hint (e.g. "用 seedance2") against `name` / `brand.name`.
-   No hint → follow "Default model selection" below.
+   No hint → follow "Default model selection" below. If the user named a
+   published look instead of a model, browse `GET /v1/templates` and submit
+   `template: <slug>`.
 3. **(Optional) Upload local files.** If the user gave a path on disk:
   ```bash
    bash scripts/upload.sh /path/to/file.png
@@ -290,8 +321,10 @@ are best-effort and may be empty when the model can't tell.
 | GET    | `/v1/models`             | List public models by `type` × `subtype`                |
 | GET    | `/v1/ai-tools`           | List curated AI tools (optional `?type=image|video`)    |
 | GET    | `/v1/ai-tools/{slug}`    | Full param schema for one tool                          |
-| POST   | `/v1/quote`              | Price a task (accepts `interfaceId` OR `aiTool`)        |
-| POST   | `/v1/tasks`              | Submit a generation (accepts `interfaceId` OR `aiTool`) |
+| GET    | `/v1/templates`          | List published templates (optional `?type=image|video`) |
+| GET    | `/v1/templates/{slug}`   | Full param schema for one template                      |
+| POST   | `/v1/quote`              | Price a task (`interfaceId` OR `aiTool` OR `template`)  |
+| POST   | `/v1/tasks`              | Submit a generation (`interfaceId` OR `aiTool` OR `template`) |
 | GET    | `/v1/tasks/{id}`         | Poll status / outputs                                   |
 | POST   | `/v1/uploads`            | Upload a file (raw body + `Content-Type`)               |
 | GET    | `/v1/uploads/{uploadId}` | Poll async (video) upload status                        |
@@ -396,7 +429,7 @@ Rules:
 ## Rate limits
 
 Per-PAT, 60s sliding window. Headline: `tasks 60/min`, `quote 120/min`,
-`uploads 30/min`, `me / upload-poll / ai-tools 120/min`, `describe-image 10/min`. `/models` and `/tasks/{id}` are unbounded. `429` carries
+`uploads 30/min`, `me / upload-poll / ai-tools / templates 120/min`, `describe-image 10/min`. `/models` and `/tasks/{id}` are unbounded. `429` carries
 `Retry-After`. Full table: `references/api-docs.md` → "Limits".
 
 ## What this skill does NOT do

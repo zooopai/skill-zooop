@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Submit one Zooop AI task. Prints the JSON response from POST /v1/tasks.
 #
-# Two modes:
+# Three modes:
 #   submit.sh <interfaceId> <versionId> '<params-json>'
-#   submit.sh --ai-tool <slug>          '<params-json>'
+#   submit.sh --ai-tool  <slug>         '<params-json>'
+#   submit.sh --template <slug>         '<params-json>'
 #
 # Examples:
 #   submit.sh d2c0... pro '{"prompt":"a red panda eating noodles","aspect_ratio":"1:1"}'
 #   submit.sh --ai-tool background-removal '{"image_url":"https://storage.zooop.ai/…"}'
+#   submit.sh --template superhero-movie-poster '{"image_urls":["https://storage.zooop.ai/…"],"hero_name":"DAFU"}'
 #
 # Discover identifiers via:
 #   GET /v1/models?type=<type>&subtype=<subType>     (raw path)
 #   GET /v1/ai-tools[?type=image|video]              (curated tools)
+#   GET /v1/templates[?type=image|video]             (gallery templates)
 #
 # Timeout / duplicate safety: a submit can succeed server-side (task created,
 # credits charged) yet still time out before the JSON reaches you — cold
@@ -36,10 +39,19 @@ if [[ ${1:-} == "--ai-tool" ]]; then
   SLUG="$2"
   PARAMS="$3"
   BODY=$(printf '{"aiTool":"%s","params":%s}' "$SLUG" "$PARAMS")
+elif [[ ${1:-} == "--template" ]]; then
+  if [[ $# -lt 3 ]]; then
+    echo "usage: $0 --template <slug> <params-json>" >&2
+    exit 64
+  fi
+  SLUG="$2"
+  PARAMS="$3"
+  BODY=$(printf '{"template":"%s","params":%s}' "$SLUG" "$PARAMS")
 else
   if [[ $# -lt 3 ]]; then
     echo "usage: $0 <interfaceId> <versionId> <params-json>" >&2
     echo "       $0 --ai-tool <slug> <params-json>" >&2
+    echo "       $0 --template <slug> <params-json>" >&2
     exit 64
   fi
   INTERFACE_ID="$1"
